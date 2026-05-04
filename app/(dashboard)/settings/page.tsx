@@ -1,18 +1,20 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { User, WhatsappInstance } from '@/types'
 import VendorAvatar from '@/components/ui/VendorAvatar'
-import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2 } from 'lucide-react'
+import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2, ScrollText, AlertCircle, Clock } from 'lucide-react'
 import type { AIProvider } from '@/lib/ai-providers'
 import { formatDistanceToNow } from '@/lib/utils'
 import { useRouter } from 'next/navigation'
+import { useSyncContext } from '@/contexts/SyncContext'
 
 export default function SettingsPage() {
   const router = useRouter()
   const supabase = createBrowserSupabaseClient()
-  const [activeTab, setActiveTab] = useState<'users' | 'instances' | 'ia' | 'api'>('users')
+  const syncCtx = useSyncContext()
+  const [activeTab, setActiveTab] = useState<'users' | 'instances' | 'ia' | 'api' | 'logs'>('users')
   const [aiProvider, setAiProvider] = useState<AIProvider>('anthropic')
   const [savingProvider, setSavingProvider] = useState(false)
   const [providerSaved, setProviderSaved] = useState(false)
@@ -25,7 +27,7 @@ export default function SettingsPage() {
   })
   const [savingInstance, setSavingInstance] = useState(false)
   const [instanceError, setInstanceError] = useState('')
-  const [testResults, setTestResults] = useState<Record<string, { connected: boolean; state: string; error?: string; loading?: boolean }>>({})
+  const [testResults, setTestResults] = useState<Record<string, { connected: boolean; state: string; error?: string; testedUrl?: string; loading?: boolean }>>({})
   const [showApiKeyFor, setShowApiKeyFor] = useState<string | null>(null)
   const [editingInstance, setEditingInstance] = useState<string | null>(null)
   const [editValues, setEditValues] = useState<Record<string, string>>({})
@@ -34,9 +36,9 @@ export default function SettingsPage() {
   const [users, setUsers] = useState<User[]>([])
   const [instances, setInstances] = useState<(WhatsappInstance & { vendedor?: User })[]>([])
   const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState<string | null>(null)
   const [syncResults, setSyncResults] = useState<Record<string, { synced: number; errors: number; skipped: number; chatsFound: number }>>({})
   const [syncErrors, setSyncErrors] = useState<Record<string, string[]>>({})
+  const lastResultRef = useRef(syncCtx.lastResult)
   const [showSyncErrors, setShowSyncErrors] = useState<string | null>(null)
 
   const [showApiKey, setShowApiKey] = useState(false)
@@ -57,6 +59,34 @@ export default function SettingsPage() {
   // Recalcular timestamps
   const [recalculating, setRecalculating] = useState(false)
   const [recalcMsg, setRecalcMsg] = useState('')
+
+  // Vincular bases con conversaciones
+  type MatchItem = { name: string; phone: string; cod_cliente: string | null; source: string }
+  type MatchReport = { matched: number; naranja: number; cancela_renueva: number; items: MatchItem[] }
+  const [matching, setMatching] = useState(false)
+  const [matchReport, setMatchReport] = useState<MatchReport | null>(null)
+  const [matchError, setMatchError] = useState('')
+  const [matchSourceFilter, setMatchSourceFilter] = useState<'all' | 'naranja' | 'cancela_renueva'>('all')
+
+  // Logs IA
+  type AnalysisLog = {
+    id: string
+    conversation_id: string
+    vendedor_id: string | null
+    triggered_by: 'auto' | 'manual'
+    status: 'success' | 'error'
+    model_used: string | null
+    error_message: string | null
+    duration_ms: number | null
+    message_count: number | null
+    created_at: string
+    analysis_id: string | null
+    conversation: { client_name: string | null; client_phone: string; display_name: string | null } | null
+    vendedor: { full_name: string } | null
+  }
+  const [logsVendorFilter, setLogsVendorFilter] = useState('')
+  const [settingsLogs, setSettingsLogs] = useState<AnalysisLog[]>([])
+  const [loadingSettingsLogs, setLoadingSettingsLogs] = useState(false)
 
   useEffect(() => {
     checkAdminAccess()
@@ -180,29 +210,18 @@ export default function SettingsPage() {
     setLoadingRemote(false)
   }
 
-  const syncInstance = async (instanceId: string) => {
-    setSyncing(instanceId)
-    const res = await fetch('/api/sync/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instanceId }),
-    })
-    const data = await res.json()
-    setSyncResults(prev => ({
-      ...prev,
-      [instanceId]: {
-        synced:     data.synced     ?? 0,
-        errors:     data.errors     ?? 0,
-        skipped:    data.skipped    ?? 0,
-        chatsFound: data.chatsFound ?? 0,
-      },
-    }))
-    if (data.errorLog?.length) {
-      setSyncErrors(prev => ({ ...prev, [instanceId]: data.errorLog }))
-    }
-    await loadData()
-    setSyncing(null)
+  const syncInstance = (instanceId: string) => {
+    syncCtx.startSync(instanceId)
   }
+
+  useEffect(() => {
+    const r = syncCtx.lastResult
+    if (!r || r === lastResultRef.current) return
+    lastResultRef.current = r
+    setSyncResults(prev => ({ ...prev, [r.instanceId]: r }))
+    if (r.errorLog.length) setSyncErrors(prev => ({ ...prev, [r.instanceId]: r.errorLog }))
+    loadData()
+  }, [syncCtx.lastResult])
 
   const createUser = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -223,6 +242,21 @@ export default function SettingsPage() {
     setCreatingUser(false)
   }
 
+  const matchBases = async () => {
+    setMatching(true)
+    setMatchReport(null)
+    setMatchError('')
+    const res = await fetch('/api/base-tn/match-retroactive', { method: 'POST' })
+    const data = await res.json()
+    if (data.error) {
+      setMatchError(data.error)
+    } else {
+      setMatchReport(data)
+      setMatchSourceFilter('all')
+    }
+    setMatching(false)
+  }
+
   const recalcTimestamps = async () => {
     setRecalculating(true)
     setRecalcMsg('')
@@ -231,6 +265,24 @@ export default function SettingsPage() {
     setRecalcMsg(data.error ?? `Recalculadas ${data.updated} de ${data.total} conversaciones.`)
     setRecalculating(false)
     await loadData()
+  }
+
+  const loadSettingsLogs = async (vendedorId?: string) => {
+    setLoadingSettingsLogs(true)
+    const params = new URLSearchParams()
+    if (vendedorId) {
+      params.set('vendedorId', vendedorId)
+    } else if (users.length > 0) {
+      params.set('vendedorId', users[0].id)
+    } else {
+      setLoadingSettingsLogs(false)
+      return
+    }
+    params.set('limit', '100')
+    const res = await fetch(`/api/analyze/logs?${params}`)
+    const data = await res.json()
+    setSettingsLogs(data.data ?? [])
+    setLoadingSettingsLogs(false)
   }
 
   const resetConversations = async () => {
@@ -249,6 +301,7 @@ export default function SettingsPage() {
     { id: 'instances', label: 'Instancias WhatsApp' },
     { id: 'ia', label: 'Proveedor IA' },
     { id: 'api', label: 'API Keys' },
+    { id: 'logs', label: 'Logs IA' },
   ] as const
 
   return (
@@ -356,6 +409,107 @@ export default function SettingsPage() {
                 </button>
               </div>
             </form>
+          </div>
+
+          {/* Vincular bases con conversaciones */}
+          <div className="bg-white rounded-lg shadow-sm border border-border p-5 space-y-4">
+            <div>
+              <h3 className="font-semibold text-body mb-1">Vincular Base Naranja / C&R</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Busca coincidencias de teléfono entre todas las conversaciones existentes y las bases importadas (Naranja y Cancela &amp; Renueva). Las nuevas conversaciones se vinculan automáticamente.
+              </p>
+              {matchError && (
+                <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 mb-3">{matchError}</p>
+              )}
+              <button
+                onClick={matchBases}
+                disabled={matching}
+                className="bg-primary hover:bg-primary-dark text-white text-sm font-semibold px-4 py-2 rounded-md transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {matching && <Loader2 size={14} className="animate-spin" />}
+                {matching ? 'Vinculando...' : 'Vincular ahora'}
+              </button>
+            </div>
+
+            {matchReport && (
+              <div className="space-y-3">
+                {/* Resumen */}
+                <div className="flex items-center gap-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="text-center">
+                    <p className="text-2xl font-bold text-green-700">{matchReport.matched}</p>
+                    <p className="text-xs text-green-600">Total vinculadas</p>
+                  </div>
+                  <div className="w-px h-10 bg-green-200" />
+                  <div className="text-center">
+                    <p className="text-lg font-bold text-orange-600">{matchReport.naranja}</p>
+                    <p className="text-xs text-orange-500">Base Naranja</p>
+                  </div>
+                  <div className="w-px h-10 bg-green-200" />
+                  <div className="text-center">
+                    <p className="text-lg font-bold text-teal-600">{matchReport.cancela_renueva}</p>
+                    <p className="text-xs text-teal-500">Cancela y Renueva</p>
+                  </div>
+                </div>
+
+                {/* Filtros */}
+                {matchReport.matched > 0 && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-500">Filtrar:</span>
+                      {(['all', 'naranja', 'cancela_renueva'] as const).map(f => (
+                        <button
+                          key={f}
+                          onClick={() => setMatchSourceFilter(f)}
+                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                            matchSourceFilter === f
+                              ? 'bg-primary text-white border-primary'
+                              : 'border-border text-gray-500 hover:border-primary/40'
+                          }`}
+                        >
+                          {f === 'all' ? 'Todas' : f === 'naranja' ? 'Naranja' : 'C&R'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Tabla */}
+                    <div className="border border-border rounded-lg overflow-hidden max-h-72 overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-bg sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Nombre</th>
+                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Teléfono</th>
+                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Cód. Cliente</th>
+                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Base</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {matchReport.items
+                            .filter(i => matchSourceFilter === 'all' || i.source === matchSourceFilter)
+                            .map((item, idx) => (
+                              <tr key={idx} className="hover:bg-bg">
+                                <td className="px-3 py-2 text-body truncate max-w-[160px]">{item.name}</td>
+                                <td className="px-3 py-2 text-gray-500">{item.phone}</td>
+                                <td className="px-3 py-2 font-medium text-primary">
+                                  {item.cod_cliente ?? '—'}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <span className={`px-1.5 py-0.5 rounded-full font-semibold ${
+                                    item.source === 'naranja'
+                                      ? 'bg-orange-100 text-orange-700'
+                                      : 'bg-teal-100 text-teal-700'
+                                  }`}>
+                                    {item.source === 'naranja' ? 'Naranja' : 'C&R'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Recalcular timestamps */}
@@ -672,16 +826,25 @@ export default function SettingsPage() {
                                   ? <><Wifi size={12} /> {test.state}</>
                                   : <><WifiOff size={12} /> {test.state}</>}
                               </span>
-                              {!test.connected && test.error && (
-                                <div className="flex items-start gap-1 mt-0.5">
-                                  <p className="text-xs text-red-400 max-w-[160px] wrap-break-word">{test.error}</p>
-                                  <button
-                                    onClick={() => navigator.clipboard.writeText(test.error!)}
-                                    className="shrink-0 text-gray-400 hover:text-gray-600"
-                                    title="Copiar error"
-                                  >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                                  </button>
+                              {!test.connected && (test.error || test.testedUrl) && (
+                                <div className="mt-0.5 space-y-0.5">
+                                  {test.error && (
+                                    <div className="flex items-start gap-1">
+                                      <p className="text-xs text-red-400 max-w-[200px] break-words">{test.error}</p>
+                                      <button
+                                        onClick={() => navigator.clipboard.writeText(`${test.error}\nURL: ${test.testedUrl ?? ''}`)}
+                                        className="shrink-0 text-gray-400 hover:text-gray-600"
+                                        title="Copiar error"
+                                      >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                      </button>
+                                    </div>
+                                  )}
+                                  {test.testedUrl && (
+                                    <p className="text-[10px] text-gray-400 font-mono break-all max-w-[200px]" title={test.testedUrl}>
+                                      → {test.testedUrl}
+                                    </p>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -717,11 +880,11 @@ export default function SettingsPage() {
                                 <div className="flex flex-col items-start gap-0.5">
                                   <button
                                     onClick={() => syncInstance(inst.id)}
-                                    disabled={syncing === inst.id}
+                                    disabled={syncCtx.syncingInstanceId === inst.id}
                                     className="text-xs text-primary hover:text-primary-dark font-medium flex items-center gap-0.5 disabled:opacity-40"
                                   >
-                                    <RefreshCw size={12} className={syncing === inst.id ? 'animate-spin' : ''} />
-                                    {syncing === inst.id ? 'Sincronizando...' : 'Sync'}
+                                    <RefreshCw size={12} className={syncCtx.syncingInstanceId === inst.id ? 'animate-spin' : ''} />
+                                    {syncCtx.syncingInstanceId === inst.id ? 'Sincronizando...' : 'Sync'}
                                   </button>
                                   {syncResults[inst.id] && (() => {
                                     const r = syncResults[inst.id]
@@ -879,7 +1042,7 @@ export default function SettingsPage() {
                   </div>
                   <div>
                     <p className="font-semibold text-body">Google Gemini</p>
-                    <p className="text-xs text-gray-500 font-mono">gemini-2.0-flash</p>
+                    <p className="text-xs text-gray-500 font-mono">gemini-flash-latest</p>
                   </div>
                 </div>
                 <ul className="text-xs text-gray-600 space-y-1">
@@ -908,6 +1071,7 @@ export default function SettingsPage() {
             <ul className="list-disc list-inside space-y-1 font-mono">
               <li>ANTHROPIC_API_KEY — requerida si usás Claude</li>
               <li>GEMINI_API_KEY — requerida si usás Gemini</li>
+              <li>AI_PROVIDER — opcional, fallback si app_config está vacío (anthropic o gemini)</li>
             </ul>
           </div>
         </div>
@@ -946,6 +1110,7 @@ export default function SettingsPage() {
                 <li>NEXT_PUBLIC_SUPABASE_ANON_KEY</li>
                 <li>SUPABASE_SERVICE_ROLE_KEY</li>
                 <li>ANTHROPIC_API_KEY</li>
+                <li>GEMINI_API_KEY</li>
                 <li>NEXT_PUBLIC_APP_URL (URL pública del deploy)</li>
                 <li>EVOLUTION_API_BASE_URL (opcional, URL base)</li>
               </ul>
@@ -954,6 +1119,128 @@ export default function SettingsPage() {
             {savedMsg && (
               <p className="text-xs text-green-600">{savedMsg}</p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Tab: Logs IA */}
+      {activeTab === 'logs' && (
+        <div className="space-y-4">
+          <div className="bg-surface rounded-lg shadow-sm border border-border p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-body flex items-center gap-2">
+                <ScrollText size={16} className="text-primary" /> Logs de análisis IA
+              </h3>
+              <button
+                onClick={() => loadSettingsLogs(logsVendorFilter || undefined)}
+                disabled={loadingSettingsLogs}
+                className="flex items-center gap-1 text-xs text-primary hover:text-primary-dark disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={loadingSettingsLogs ? 'animate-spin' : ''} />
+                Actualizar
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3 mb-4">
+              <select
+                value={logsVendorFilter}
+                onChange={e => {
+                  setLogsVendorFilter(e.target.value)
+                  loadSettingsLogs(e.target.value || undefined)
+                }}
+                className="text-sm border border-border rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="">Seleccioná un vendedor</option>
+                {users.map(u => (
+                  <option key={u.id} value={u.id}>{u.full_name}</option>
+                ))}
+              </select>
+              {!logsVendorFilter && (
+                <p className="text-xs text-gray-400">Elegí un vendedor para ver sus logs</p>
+              )}
+            </div>
+
+            {logsVendorFilter && (
+              loadingSettingsLogs ? (
+                <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+                  <Loader2 size={14} className="animate-spin" /> Cargando logs...
+                </div>
+              ) : settingsLogs.length === 0 ? (
+                <p className="text-sm text-gray-400 py-4">Sin análisis registrados para este vendedor.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-400 border-b border-border bg-gray-50">
+                        <th className="text-left px-3 py-2 font-medium">Fecha</th>
+                        <th className="text-left px-3 py-2 font-medium">Conversación</th>
+                        <th className="text-left px-3 py-2 font-medium">Tipo</th>
+                        <th className="text-left px-3 py-2 font-medium">Estado</th>
+                        <th className="text-left px-3 py-2 font-medium">Modelo</th>
+                        <th className="text-left px-3 py-2 font-medium">Msgs</th>
+                        <th className="text-left px-3 py-2 font-medium">Duración</th>
+                        <th className="text-left px-3 py-2 font-medium">Error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {settingsLogs.map(log => (
+                        <tr key={log.id} className="border-b border-border/50 hover:bg-gray-50">
+                          <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                            {new Date(log.created_at).toLocaleString('es-AR', {
+                              day: '2-digit', month: '2-digit', year: '2-digit',
+                              hour: '2-digit', minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate">
+                            {log.conversation?.display_name ?? log.conversation?.client_name ?? log.conversation?.client_phone ?? log.conversation_id.slice(0, 8)}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${log.triggered_by === 'auto' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
+                              {log.triggered_by === 'auto' ? 'Auto' : 'Manual'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            {log.status === 'success' ? (
+                              <span className="flex items-center gap-1 text-green-600 font-medium">
+                                <CheckCircle size={11} /> OK
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1 text-red-500 font-medium">
+                                <AlertCircle size={11} /> Error
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-gray-500 font-mono text-[10px] truncate max-w-[120px]">
+                            {log.model_used ?? '—'}
+                          </td>
+                          <td className="px-3 py-2 text-gray-500">{log.message_count ?? '—'}</td>
+                          <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                            {log.duration_ms != null ? (
+                              <span className="flex items-center gap-0.5">
+                                <Clock size={10} />{(log.duration_ms / 1000).toFixed(1)}s
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-red-400 text-[10px] max-w-[200px] truncate" title={log.error_message ?? ''}>
+                            {log.error_message ?? ''}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
+          </div>
+
+          <div className="p-4 bg-blue-50 rounded-md border border-blue-200 text-xs text-blue-700">
+            <p className="font-semibold mb-1">Sobre los logs de análisis IA</p>
+            <ul className="list-disc list-inside space-y-1">
+              <li><strong>Auto:</strong> disparado en segundo plano cada 5 minutos</li>
+              <li><strong>Manual:</strong> disparado por el botón &quot;Analizar con IA&quot; en la conversación</li>
+              <li>Se registran tanto los análisis exitosos como los que fallan, con su causa</li>
+              <li>Requiere que la migración <code>analysis_logs.sql</code> esté ejecutada en Supabase</li>
+            </ul>
           </div>
         </div>
       )}

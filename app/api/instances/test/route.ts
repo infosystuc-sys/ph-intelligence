@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
+import { evolutionFetch } from '@/lib/evolution'
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,12 +26,10 @@ export async function POST(req: NextRequest) {
         .single()
 
       if (!inst) return NextResponse.json({ error: 'Instancia no encontrada' }, { status: 404 })
-      // Siempre usar la URL del env var si está definida
       url = defaultUrl || inst.api_url
       key = inst.api_key
       name = inst.instance_name
     } else {
-      // Para test de nueva instancia, también preferir env var
       url = defaultUrl || api_url
     }
 
@@ -38,18 +37,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Faltan datos: api_url, api_key, instance_name' }, { status: 400 })
     }
 
-    // Llamar a Evolution API para verificar estado de conexión
+    // Remover barra final para evitar doble slash
+    const baseUrl = url.replace(/\/$/, '')
+    const endpoint = `${baseUrl}/instance/connectionState/${name}`
+
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 8000)
 
     try {
-      const res = await fetch(
-        `${url}/instance/connectionState/${name}`,
-        {
-          headers: { apikey: key },
-          signal: controller.signal,
-        }
-      )
+      const res = await evolutionFetch(endpoint, {
+        headers: { apikey: key },
+        signal: controller.signal,
+      })
       clearTimeout(timeout)
 
       if (!res.ok) {
@@ -57,6 +56,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
           connected: false,
           state: 'error',
+          testedUrl: endpoint,
           error: `HTTP ${res.status}: ${text.slice(0, 200)}`,
         })
       }
@@ -65,7 +65,6 @@ export async function POST(req: NextRequest) {
       const state = data?.instance?.state ?? data?.state ?? 'unknown'
       const connected = state === 'open'
 
-      // Actualizar estado en BD si viene por instanceId
       if (instanceId) {
         const service = createServiceSupabaseClient()
         await service
@@ -74,14 +73,27 @@ export async function POST(req: NextRequest) {
           .eq('id', instanceId)
       }
 
-      return NextResponse.json({ connected, state, raw: data })
+      return NextResponse.json({ connected, state, testedUrl: endpoint, raw: data })
     } catch (fetchError) {
       clearTimeout(timeout)
-      const isTimeout = (fetchError as Error).name === 'AbortError'
+      const err = fetchError as Error & { cause?: { message?: string; code?: string } }
+      const isTimeout = err.name === 'AbortError'
+
+      let errorMsg: string
+      if (isTimeout) {
+        errorMsg = 'Timeout: la instancia no respondió en 8 segundos'
+      } else {
+        // Node.js encapsula el error real en err.cause (ECONNREFUSED, CERT_HAS_EXPIRED, etc.)
+        const cause = err.cause
+        const causeDetail = [cause?.code, cause?.message].filter(Boolean).join(' — ')
+        errorMsg = causeDetail || err.message || String(fetchError)
+      }
+
       return NextResponse.json({
         connected: false,
         state: 'unreachable',
-        error: isTimeout ? 'Timeout: la instancia no respondió en 8 segundos' : String(fetchError),
+        testedUrl: endpoint,
+        error: errorMsg,
       })
     }
   } catch (error) {

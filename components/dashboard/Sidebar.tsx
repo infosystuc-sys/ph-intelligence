@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import Image from 'next/image'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { User } from '@/types'
+import { useSyncContext } from '@/contexts/SyncContext'
 import {
   LayoutDashboard,
   MessageSquare,
@@ -15,11 +16,16 @@ import {
   ChevronRight,
   CreditCard,
   PhoneOff,
+  Archive,
+  RefreshCw,
+  Brain,
 } from 'lucide-react'
 
 const navItems = [
   { href: '/dashboard',        label: 'Dashboard',             icon: LayoutDashboard, roles: ['admin', 'supervisor', 'vendedor'] },
   { href: '/conversations',    label: 'Conversaciones',        icon: MessageSquare,   roles: ['admin', 'supervisor', 'vendedor'] },
+  { href: '/historico',        label: 'Histórico',             icon: Archive,         roles: ['admin', 'supervisor', 'vendedor'] },
+  { href: '/analyses',         label: 'Análisis IA',           icon: Brain,           roles: ['admin', 'supervisor', 'vendedor'] },
   { href: '/vendors',          label: 'Vendedores',            icon: Users,           roles: ['admin', 'supervisor'] },
   { href: '/pipeline',         label: 'Pipeline',              icon: Kanban,          roles: ['admin', 'supervisor'] },
   { href: '/employee-phones',  label: 'Teléfonos Empleados',   icon: PhoneOff,        roles: ['admin', 'supervisor', 'vendedor'] },
@@ -37,6 +43,7 @@ export default function Sidebar({ user }: { user: User }) {
   const pathname = usePathname()
   const router = useRouter()
   const supabase = createBrowserSupabaseClient()
+  const { isSyncing, syncingInstanceId } = useSyncContext()
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
@@ -97,6 +104,16 @@ export default function Sidebar({ user }: { user: User }) {
           )
         })}
       </nav>
+
+      {/* Sync indicator */}
+      {isSyncing && (
+        <div className="mx-3 mb-2 flex items-center gap-2 px-3 py-2 rounded-md bg-primary/5 text-primary text-xs font-medium">
+          <RefreshCw size={12} className="animate-spin shrink-0" />
+          <span className="truncate">
+            Sincronizando{syncingInstanceId ? '…' : ''}
+          </span>
+        </div>
+      )}
 
       {/* Logout */}
       <div className="px-3 py-4 border-t border-border">

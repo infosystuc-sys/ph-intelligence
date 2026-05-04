@@ -2,12 +2,12 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import ConversationCard from '@/components/conversations/ConversationCard'
+import ConvList from '@/components/conversations/ConvList'
 import ChatBubble from '@/components/conversations/ChatBubble'
 import ScoreBadge from '@/components/ui/ScoreBadge'
 import { Conversation, Message } from '@/types'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
-import { Search, Filter, Brain, ExternalLink, RefreshCw, X, Loader2, PhoneOff, Users, ChevronDown, Pencil, Check } from 'lucide-react'
+import { Search, Filter, Brain, ExternalLink, RefreshCw, X, Loader2, PhoneOff, Users, ChevronDown, Pencil, Check, ScrollText, CheckCircle, AlertCircle, Clock, Trash2, Archive, CheckSquare } from 'lucide-react'
 import { STAGE_LABELS, formatPhone, normalizePhone } from '@/lib/utils'
 import { WhatsappInstance } from '@/types'
 
@@ -25,39 +25,68 @@ export default function ConversationsPage() {
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState(searchParams.get('status') ?? '')
   const [filterStage, setFilterStage] = useState('')
-  const [filterInstance, setFilterInstance] = useState('')
+  const [selectedInstance, setSelectedInstance] = useState('')
   const [instances, setInstances] = useState<WhatsappInstance[]>([])
   const [hideEmployeePhones, setHideEmployeePhones] = useState(true)
   const [employeePhones, setEmployeePhones] = useState<Set<string>>(new Set())
   const [groupsExpanded, setGroupsExpanded] = useState(false)
   const [addingPhone, setAddingPhone] = useState(false)
   const [addPhoneMsg, setAddPhoneMsg] = useState<{ type: 'ok' | 'error' | 'exists'; text: string } | null>(null)
-  const [codClienteMap, setCodClienteMap] = useState<Record<string, string>>({})
+  const [baseMap, setBaseMap] = useState<Record<string, { cod_cliente: string | null; source: string }>>({})
 
   // Edición de nombre en el header
   const [editingName, setEditingName] = useState(false)
   const [editNameValue, setEditNameValue] = useState('')
   const [savingName, setSavingName] = useState(false)
 
+  // Rol del usuario (para mostrar acciones de admin/supervisor)
+  const [userRole, setUserRole] = useState<string>('')
+
+  // Selección múltiple
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkWorking, setBulkWorking] = useState(false)
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+
+  // Log de análisis IA por conversación
+  type AnalysisLog = {
+    id: string
+    triggered_by: 'auto' | 'manual'
+    status: 'success' | 'error'
+    model_used: string | null
+    error_message: string | null
+    duration_ms: number | null
+    message_count: number | null
+    created_at: string
+    analysis_id: string | null
+  }
+  const [showLogPanel, setShowLogPanel] = useState(false)
+  const [aiLogs, setAiLogs] = useState<AnalysisLog[]>([])
+  const [loadingLogs, setLoadingLogs] = useState(false)
+
   const supabase = createBrowserSupabaseClient()
 
-  const loadConversations = useCallback(async () => {
-    setLoading(true)
-    const params = new URLSearchParams()
-    if (filterStatus) params.set('status', filterStatus)
-    if (filterStage) params.set('stage', filterStage)
-    if (filterInstance) params.set('instanceId', filterInstance)
-    params.set('limit', '50')
-
-    const res = await fetch(`/api/conversations?${params}`)
+  const loadConversations = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    // Carga todas las conversaciones activas de una vez — filtros aplicados client-side
+    const res = await fetch('/api/conversations?limit=2000')
     const data = await res.json()
     setConversations(data.data ?? [])
-    setLoading(false)
-  }, [filterStatus, filterStage, filterInstance])
+    if (!silent) setLoading(false)
+  }, [])
 
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
+
+  // Cargar rol del usuario una sola vez al montar
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return
+      supabase.from('users').select('role').eq('id', user.id).single()
+        .then(({ data }) => { if (data) setUserRole(data.role) })
+    })
+  }, [supabase])
 
   // Cargar datos auxiliares una sola vez al montar
   useEffect(() => {
@@ -71,7 +100,7 @@ export default function ConversationsPage() {
     fetch('/api/base-tn/lookup')
       .then(r => r.json())
       .then(d => {
-        if (d.data) setCodClienteMap(d.data)
+        if (d.data) setBaseMap(d.data)
       })
 
     fetch('/api/instances')
@@ -81,16 +110,50 @@ export default function ConversationsPage() {
       })
   }, [])
 
-  // Suscripción Realtime: recargar lista y mensajes cuando llega uno nuevo vía webhook
+  // Suscripción Realtime: actualiza la conversación localmente y re-ordena de inmediato.
+  // No hace un fetch completo para no mostrar "Cargando..." en cada mensaje.
   useEffect(() => {
     const channel = supabase
       .channel('messages-realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' },
-        async (payload) => {
-          loadConversations()
-          // Si la conversación activa recibió el mensaje, recargar desde Evolution API
+        (payload) => {
+          const msg = payload.new as {
+            conversation_id: string
+            content: string
+            msg_timestamp: string
+            from_me: boolean
+            type: string
+          }
+
+          setConversations(prev => {
+            const updated = prev.map(c => {
+              if (c.id !== msg.conversation_id) return c
+              return {
+                ...c,
+                last_message_at: msg.msg_timestamp,
+                message_count: (c.message_count ?? 0) + 1,
+                last_message: {
+                  id: '',
+                  conversation_id: c.id,
+                  content: msg.content ?? '',
+                  type: (msg.type ?? 'text') as Message['type'],
+                  from_me: msg.from_me ?? false,
+                  msg_timestamp: msg.msg_timestamp,
+                  media_url: null,
+                },
+              }
+            })
+            // Re-ordenar por último mensaje desc
+            return updated.sort((a, b) => {
+              const at = a.last_message_at ? new Date(a.last_message_at).getTime() : 0
+              const bt = b.last_message_at ? new Date(b.last_message_at).getTime() : 0
+              return bt - at
+            })
+          })
+
+          // Si la conversación activa recibió el mensaje, recargar sus mensajes
           setSelected(prev => {
-            if (prev && payload.new && (payload.new as { conversation_id: string }).conversation_id === prev.id) {
+            if (prev?.id === msg.conversation_id) {
               fetch(`/api/messages?conversationId=${prev.id}`)
                 .then(r => r.json())
                 .then(d => setMessages(d.messages ?? []))
@@ -102,12 +165,74 @@ export default function ConversationsPage() {
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [supabase, loadConversations])
+  }, [supabase])
+
+  // Realtime: cuando el auto-análisis crea un nuevo registro en ai_analyses,
+  // actualizar el puntaje en la tarjeta y en el header sin esperar el refresco de 5 min.
+  useEffect(() => {
+    const channel = supabase
+      .channel('ai-analyses-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ai_analyses' },
+        (payload) => {
+          const a = payload.new as {
+            id: string
+            conversation_id: string
+            quality_score: number
+            conversation_stage: string
+            sentiment: string
+            analyzed_at: string
+          }
+          const newAnalysis = { id: a.id, quality_score: a.quality_score, conversation_stage: a.conversation_stage, sentiment: a.sentiment, analyzed_at: a.analyzed_at }
+
+          setConversations(prev => prev.map(c => {
+            if (c.id !== a.conversation_id) return c
+            const existing = Array.isArray(c.ai_analysis) ? c.ai_analysis : (c.ai_analysis ? [c.ai_analysis] : [])
+            return { ...c, ai_analysis: [newAnalysis, ...existing] }
+          }))
+
+          setSelected(prev => {
+            if (!prev || prev.id !== a.conversation_id) return prev
+            const existing = Array.isArray(prev.ai_analysis) ? prev.ai_analysis : (prev.ai_analysis ? [prev.ai_analysis] : [])
+            return { ...prev, ai_analysis: [newAnalysis, ...existing] }
+          })
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [supabase])
+
+  // Dispara un análisis automático de 1 conversación pendiente sin bloquear la UI.
+  // Fire-and-forget: no muestra loading ni notificaciones al usuario.
+  const triggerAutoAnalysis = useCallback(() => {
+    fetch('/api/analyze/auto', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => { if (d.analyzed) console.log('[AutoAnalysis]', d.conversationId) })
+      .catch(() => {}) // silencioso ante cualquier error
+  }, [])
+
+  // Refresco silencioso cada 5 minutos + disparo de auto-análisis
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadConversations(true)
+      triggerAutoAnalysis()
+    }, 5 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [loadConversations, triggerAutoAnalysis])
+
+  // Primer análisis automático: 20 segundos después del montaje
+  // (deja que la carga inicial termine antes de hacer la llamada al LLM)
+  useEffect(() => {
+    const timer = setTimeout(triggerAutoAnalysis, 20_000)
+    return () => clearTimeout(timer)
+  }, [triggerAutoAnalysis])
 
   const selectConversation = async (conv: Conversation) => {
     setSelected(conv)
     setMessages([])
     setEditingName(false)
+    setShowLogPanel(false)
+    setAiLogs([])
     setLoadingMessages(true)
     try {
       const res = await fetch(`/api/messages?conversationId=${conv.id}`)
@@ -116,6 +241,67 @@ export default function ConversationsPage() {
     } finally {
       setLoadingMessages(false)
     }
+  }
+
+  const loadAiLogs = async (conversationId: string) => {
+    setLoadingLogs(true)
+    try {
+      const res = await fetch(`/api/analyze/logs?conversationId=${conversationId}&limit=20`)
+      const data = await res.json()
+      setAiLogs(data.data ?? [])
+    } finally {
+      setLoadingLogs(false)
+    }
+  }
+
+  const toggleLogPanel = () => {
+    if (!selected) return
+    if (!showLogPanel) {
+      loadAiLogs(selected.id)
+    }
+    setShowLogPanel(v => !v)
+  }
+
+  const toggleSelection = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false)
+    setSelectedIds(new Set())
+    setConfirmBulkDelete(false)
+  }
+
+  const handleBulkMoveHistorico = async () => {
+    if (!selectedIds.size) return
+    setBulkWorking(true)
+    await fetch('/api/conversations', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...selectedIds], status: 'historico' }),
+    })
+    setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
+    if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
+    exitSelectionMode()
+    setBulkWorking(false)
+  }
+
+  const handleBulkDelete = async () => {
+    if (!selectedIds.size) return
+    setBulkWorking(true)
+    await fetch('/api/conversations', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...selectedIds] }),
+    })
+    setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
+    if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
+    exitSelectionMode()
+    setBulkWorking(false)
   }
 
   const handleAnalyze = async () => {
@@ -171,26 +357,47 @@ export default function ConversationsPage() {
   const matchesSearch = (c: Conversation) => {
     if (!search) return true
     const q = search.toLowerCase()
-    const name = c.display_name ?? c.client_name ?? ''
-    return (
-      name.toLowerCase().includes(q) ||
-      c.client_phone.toLowerCase().includes(q) ||
-      (c.vendedor?.full_name ?? '').toLowerCase().includes(q)
-    )
+    // Cuando hay debouncedSearch el API ya filtró por nombre/teléfono/cod_cliente.
+    // Acá solo aplicamos campos adicionales que el API no cubre.
+    const localFields = [
+      c.display_name,
+      c.client_name,
+      c.client_phone,
+      formatPhone(c.client_phone),
+      c.cod_cliente,
+      c.vendedor?.full_name,
+      c.last_message?.content,
+      c.base_source === 'cancela_renueva' ? 'cancela renueva' : c.base_source,
+      c.status,
+    ]
+    return localFields.some(f => f?.toLowerCase().includes(q))
   }
 
-  const getCodCliente = (phone: string) => {
-    const norm = normalizePhone(phone)
-    return codClienteMap[norm]
+  const getBaseMatch = (conv: Conversation) => {
+    if (conv.base_source) return { cod_cliente: conv.cod_cliente ?? null, source: conv.base_source }
+    const norm = normalizePhone(conv.client_phone)
+    return baseMap[norm] ?? null
   }
 
   const individualConvs = conversations.filter(c =>
     !isGroup(c) &&
     !(hideEmployeePhones && employeePhones.has(c.client_phone)) &&
+    (!selectedInstance || c.instance_id === selectedInstance) &&
+    (!filterStatus || c.status === filterStatus) &&
+    matchesSearch(c)
+  ).filter(c => {
+    if (!filterStage) return true
+    const analyses = c.ai_analysis as Array<{ conversation_stage: string; analyzed_at: string }> | null
+    if (!analyses || analyses.length === 0) return false
+    const latest = [...analyses].sort((a, b) => new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime())[0]
+    return latest.conversation_stage === filterStage
+  })
+
+  const groupConvs = conversations.filter(c =>
+    isGroup(c) &&
+    (!selectedInstance || c.instance_id === selectedInstance) &&
     matchesSearch(c)
   )
-
-  const groupConvs = conversations.filter(c => isGroup(c) && matchesSearch(c))
 
   const handleAddEmployeePhone = async () => {
     if (!selected) return
@@ -228,7 +435,13 @@ export default function ConversationsPage() {
   }
 
   const latestAnalysis = selected
-    ? (Array.isArray(selected.ai_analysis) ? selected.ai_analysis[0] : selected.ai_analysis)
+    ? (() => {
+        const arr = Array.isArray(selected.ai_analysis)
+          ? selected.ai_analysis
+          : selected.ai_analysis ? [selected.ai_analysis] : []
+        return (arr as Array<{ id: string; quality_score: number; analyzed_at: string }>)
+          .sort((a, b) => new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime())[0] ?? null
+      })()
     : null
 
   const selectedDisplayName = selected
@@ -239,8 +452,102 @@ export default function ConversationsPage() {
     <div className="flex h-full">
       {/* Panel izquierdo: lista de conversaciones */}
       <div className="w-80 border-r border-border bg-surface flex flex-col shrink-0">
+
+        {/* Toolbar de selección múltiple */}
+        {selectionMode && (
+          <div className="px-3 py-2 border-b border-border bg-primary/5 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-primary">
+                {selectedIds.size} seleccionada{selectedIds.size !== 1 ? 's' : ''}
+              </span>
+              <button onClick={exitSelectionMode} className="text-xs text-gray-400 hover:text-body">
+                Cancelar
+              </button>
+            </div>
+            {!confirmBulkDelete ? (
+              <div className="flex gap-1.5">
+                <button
+                  onClick={handleBulkMoveHistorico}
+                  disabled={!selectedIds.size || bulkWorking}
+                  className="flex-1 flex items-center justify-center gap-1 text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-2 py-1.5 rounded disabled:opacity-40 transition-colors"
+                >
+                  {bulkWorking ? <Loader2 size={11} className="animate-spin" /> : <Archive size={11} />}
+                  Histórico
+                </button>
+                <button
+                  onClick={() => setConfirmBulkDelete(true)}
+                  disabled={!selectedIds.size || bulkWorking}
+                  className="flex-1 flex items-center justify-center gap-1 text-xs bg-red-600 hover:bg-red-700 text-white font-medium px-2 py-1.5 rounded disabled:opacity-40 transition-colors"
+                >
+                  <Trash2 size={11} /> Eliminar
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <p className="text-xs text-red-600 font-medium">
+                  ¿Eliminar {selectedIds.size} conversación{selectedIds.size !== 1 ? 'es' : ''} permanentemente?
+                </p>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={handleBulkDelete}
+                    disabled={bulkWorking}
+                    className="flex-1 text-xs bg-red-600 hover:bg-red-700 text-white font-semibold px-2 py-1.5 rounded disabled:opacity-50 transition-colors"
+                  >
+                    {bulkWorking ? <Loader2 size={11} className="animate-spin mx-auto" /> : 'Sí, eliminar'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmBulkDelete(false)}
+                    className="flex-1 text-xs border border-border text-gray-500 hover:text-body px-2 py-1.5 rounded transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tabs por instancia */}
+        {instances.length > 0 && (
+          <div className="flex overflow-x-auto border-b border-border bg-surface shrink-0 px-2 py-1.5 gap-1 scrollbar-none">
+            <button
+              onClick={() => setSelectedInstance('')}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                !selectedInstance ? 'bg-primary text-white' : 'text-muted hover:bg-bg hover:text-body'
+              }`}
+            >
+              Todas
+              <span className={`ml-1 text-[10px] ${!selectedInstance ? 'opacity-80' : 'text-gray-400'}`}>
+                ({conversations.filter(c => !isGroup(c) && !(hideEmployeePhones && employeePhones.has(c.client_phone))).length})
+              </span>
+            </button>
+            {instances.map(inst => {
+              const count = conversations.filter(c =>
+                !isGroup(c) &&
+                c.instance_id === inst.id &&
+                !(hideEmployeePhones && employeePhones.has(c.client_phone))
+              ).length
+              const active = selectedInstance === inst.id
+              return (
+                <button
+                  key={inst.id}
+                  onClick={() => setSelectedInstance(inst.id)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                    active ? 'bg-primary text-white' : 'text-muted hover:bg-bg hover:text-body'
+                  }`}
+                >
+                  {inst.instance_name.split(' ')[0]}
+                  <span className={`ml-1 text-[10px] ${active ? 'opacity-80' : 'text-gray-400'}`}>
+                    ({count})
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+
         {/* Filtros */}
-        <div className="p-3 border-b border-border space-y-2">
+        <div className="p-3 border-b border-border space-y-2 shrink-0">
           <div className="relative">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
             <input
@@ -276,94 +583,65 @@ export default function ConversationsPage() {
             </select>
           </div>
 
-          {instances.length > 1 && (
-            <select
-              value={filterInstance}
-              onChange={e => setFilterInstance(e.target.value)}
-              className="w-full text-xs border border-border rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary"
-            >
-              <option value="">Todas las instancias</option>
-              {instances.map(inst => (
-                <option key={inst.id} value={inst.id}>
-                  {inst.instance_name}{inst.phone_number ? ` (${inst.phone_number})` : ''}
-                </option>
-              ))}
-            </select>
-          )}
+          <div className="flex items-center gap-2">
+            {/* Toggle: ocultar teléfonos de empleados */}
+            {employeePhones.size > 0 && (
+              <button
+                onClick={() => setHideEmployeePhones(v => !v)}
+                className={`flex items-center gap-1 flex-1 px-2 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                  hideEmployeePhones
+                    ? 'bg-primary/10 border-primary/30 text-primary'
+                    : 'bg-bg border-border text-gray-500 hover:border-primary/30 hover:text-primary'
+                }`}
+              >
+                <PhoneOff size={11} />
+                {hideEmployeePhones ? `Ocultando ${employeePhones.size} emp.` : 'Incl. empleados'}
+              </button>
+            )}
 
-          {/* Toggle: ocultar teléfonos de empleados */}
-          {employeePhones.size > 0 && (
-            <button
-              onClick={() => setHideEmployeePhones(v => !v)}
-              className={`flex items-center gap-1.5 w-full px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors ${
-                hideEmployeePhones
-                  ? 'bg-primary/10 border-primary/30 text-primary'
-                  : 'bg-bg border-border text-gray-500 hover:border-primary/30 hover:text-primary'
-              }`}
-            >
-              <PhoneOff size={11} />
-              {hideEmployeePhones
-                ? `Ocultando ${employeePhones.size} tel. de empleados`
-                : 'Mostrando todos (incl. empleados)'}
-            </button>
-          )}
+            {/* Botón Seleccionar — solo admin/supervisor */}
+            {['admin', 'supervisor'].includes(userRole) && !selectionMode && (
+              <button
+                onClick={() => setSelectionMode(true)}
+                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium border border-border text-gray-500 hover:border-primary/30 hover:text-primary transition-colors"
+              >
+                <CheckSquare size={11} /> Seleccionar
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Lista */}
-        <div className="flex-1 overflow-y-auto">
-          {loading ? (
-            <div className="p-4 text-center text-gray-400 text-sm">Cargando...</div>
-          ) : individualConvs.length === 0 && groupConvs.length === 0 ? (
-            <div className="p-4 text-center text-gray-400 text-sm">
-              No se encontraron conversaciones
-            </div>
-          ) : (
-            <>
-              {/* Conversaciones individuales */}
-              {individualConvs.map(conv => (
-                <ConversationCard
-                  key={conv.id}
-                  conversation={conv}
-                  onClick={() => selectConversation(conv)}
-                  selected={selected?.id === conv.id}
-                  codCliente={getCodCliente(conv.client_phone)}
-                  onSaveName={handleSaveName}
-                />
-              ))}
+        {/* Contador */}
+        {!loading && (
+          <div className="px-3 py-1 border-b border-border bg-bg flex items-center justify-between shrink-0">
+            <span className="text-[11px] text-muted">
+              {individualConvs.length === 0
+                ? 'Sin conversaciones'
+                : `${individualConvs.length} conversación${individualConvs.length !== 1 ? 'es' : ''}`}
+            </span>
+            {conversations.length > 0 && (
+              <span className="text-[10px] text-gray-400">
+                {conversations.filter(c => !isGroup(c)).length} totales
+              </span>
+            )}
+          </div>
+        )}
 
-              {/* Sección Grupos internos — colapsable, una sola entrada */}
-              {groupConvs.length > 0 && (
-                <div className="border-t border-border">
-                  <button
-                    onClick={() => setGroupsExpanded(v => !v)}
-                    className="flex items-center justify-between w-full px-4 py-2.5 bg-blue-50 hover:bg-blue-100 transition-colors text-left"
-                  >
-                    <span className="flex items-center gap-2 text-xs font-semibold text-blue-700">
-                      <Users size={13} />
-                      Grupos internos
-                      <span className="bg-blue-200 text-blue-800 px-1.5 py-0.5 rounded-full text-[10px]">
-                        {groupConvs.length}
-                      </span>
-                    </span>
-                    <ChevronDown
-                      size={13}
-                      className={`text-blue-500 transition-transform ${groupsExpanded ? 'rotate-180' : ''}`}
-                    />
-                  </button>
-
-                  {groupsExpanded && groupConvs.map(conv => (
-                    <ConversationCard
-                      key={conv.id}
-                      conversation={conv}
-                      onClick={() => selectConversation(conv)}
-                      selected={selected?.id === conv.id}
-                    />
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        {/* Lista virtualizada */}
+        <ConvList
+          loading={loading}
+          individualConvs={individualConvs}
+          groupConvs={groupConvs}
+          selected={selected}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          groupsExpanded={groupsExpanded}
+          setGroupsExpanded={setGroupsExpanded}
+          getBaseMatch={getBaseMatch}
+          handleSaveName={handleSaveName}
+          selectConversation={selectConversation}
+          toggleSelection={toggleSelection}
+        />
       </div>
 
       {/* Panel derecho: chat */}
@@ -422,12 +700,19 @@ export default function ConversationsPage() {
                 {selected.display_name && selected.client_name && selected.display_name !== selected.client_name && (
                   <p className="text-[10px] text-gray-400 leading-tight">{selected.client_name}</p>
                 )}
-                <p className="text-xs text-gray-500 mt-0.5">
+                <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
                   {formatPhone(selected.client_phone)}
-                  {getCodCliente(selected.client_phone) && (
-                    <span className="ml-1.5 text-primary font-medium">#{getCodCliente(selected.client_phone)}</span>
-                  )}
-                  {' · '}{selected.vendedor?.full_name ?? '—'} · {selected.message_count} mensajes
+                  {getBaseMatch(selected) && (() => {
+                    const m = getBaseMatch(selected)!
+                    return (
+                      <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                        m.source === 'cancela_renueva' ? 'bg-teal-100 text-teal-700' : 'bg-orange-100 text-orange-700'
+                      }`}>
+                        {m.source === 'cancela_renueva' ? 'C&R' : m.cod_cliente ? `#${m.cod_cliente}` : 'Naranja'}
+                      </span>
+                    )
+                  })()}
+                  <span>{' · '}{selected.vendedor?.full_name ?? '—'} · {selected.message_count} mensajes</span>
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -500,11 +785,96 @@ export default function ConversationsPage() {
                 <button onClick={() => selectConversation(selected)} className="text-muted hover:text-body">
                   <RefreshCw size={14} />
                 </button>
+                <button
+                  onClick={toggleLogPanel}
+                  title="Ver log de análisis IA"
+                  className={`transition-colors ${showLogPanel ? 'text-primary' : 'text-muted hover:text-body'}`}
+                >
+                  <ScrollText size={14} />
+                </button>
                 <button onClick={() => { setSelected(null); setAddPhoneMsg(null); setEditingName(false) }} className="text-muted hover:text-body">
                   <X size={16} />
                 </button>
               </div>
             </div>
+
+            {/* Panel de log IA */}
+            {showLogPanel && (
+              <div className="border-b border-border bg-gray-50 px-5 py-3 max-h-64 overflow-y-auto">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-body flex items-center gap-1.5">
+                    <ScrollText size={12} className="text-primary" />
+                    Log de análisis IA
+                  </span>
+                  <button onClick={() => loadAiLogs(selected.id)} className="text-muted hover:text-body" title="Actualizar">
+                    <RefreshCw size={11} />
+                  </button>
+                </div>
+                {loadingLogs ? (
+                  <div className="flex items-center gap-2 text-xs text-gray-400 py-2">
+                    <Loader2 size={12} className="animate-spin" /> Cargando logs...
+                  </div>
+                ) : aiLogs.length === 0 ? (
+                  <p className="text-xs text-gray-400 py-1">Sin análisis registrados para esta conversación.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-400 border-b border-border">
+                        <th className="text-left pb-1 font-medium pr-3">Fecha</th>
+                        <th className="text-left pb-1 font-medium pr-3">Tipo</th>
+                        <th className="text-left pb-1 font-medium pr-3">Estado</th>
+                        <th className="text-left pb-1 font-medium pr-3">Modelo</th>
+                        <th className="text-left pb-1 font-medium pr-3">Msgs</th>
+                        <th className="text-left pb-1 font-medium">Duración</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {aiLogs.map(log => (
+                        <tr key={log.id} className="border-b border-border/50 last:border-0">
+                          <td className="py-1 pr-3 text-gray-500 whitespace-nowrap">
+                            {new Date(log.created_at).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td className="py-1 pr-3">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${log.triggered_by === 'auto' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
+                              {log.triggered_by === 'auto' ? 'Auto' : 'Manual'}
+                            </span>
+                          </td>
+                          <td className="py-1 pr-3">
+                            {log.status === 'success' ? (
+                              <span className="flex items-center gap-1 text-green-600">
+                                <CheckCircle size={11} /> OK
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1 text-red-500" title={log.error_message ?? ''}>
+                                <AlertCircle size={11} /> Error
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1 pr-3 text-gray-500 font-mono text-[10px] truncate max-w-[120px]">
+                            {log.model_used ?? '—'}
+                          </td>
+                          <td className="py-1 pr-3 text-gray-500">{log.message_count ?? '—'}</td>
+                          <td className="py-1 text-gray-500 flex items-center gap-0.5">
+                            <Clock size={10} />
+                            {log.duration_ms != null ? `${(log.duration_ms / 1000).toFixed(1)}s` : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {aiLogs.some(l => l.status === 'error') && (
+                  <div className="mt-2 space-y-1">
+                    {aiLogs.filter(l => l.status === 'error' && l.error_message).map(log => (
+                      <p key={log.id} className="text-[10px] text-red-500 bg-red-50 rounded px-2 py-1">
+                        {new Date(log.created_at).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        {' — '}{log.error_message}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Mensajes */}
             <div className="flex-1 overflow-y-auto p-4 space-y-1">

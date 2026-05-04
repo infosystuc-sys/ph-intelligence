@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+
+export const maxDuration = 60
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { syncInstanceConversations } from '@/lib/evolution'
 import { WhatsappInstance } from '@/types'
@@ -42,7 +44,7 @@ export async function POST(req: NextRequest) {
 
     // Sincronizar en paralelo
     const results = await Promise.allSettled(
-      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance))
+      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance, 15))
     )
 
     const totals = results.reduce(

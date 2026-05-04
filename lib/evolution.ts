@@ -1,5 +1,47 @@
+import https from 'https'
+import http from 'http'
 import { createServiceSupabaseClient } from './supabase-server'
 import { EvolutionChat, EvolutionMessage, WhatsappInstance } from '@/types'
+
+// Agente HTTPS que acepta certificados auto-firmados (Easypanel usa self-signed cert).
+// Se aplica solo a llamadas a Evolution API, no afecta Supabase ni Anthropic.
+const sslAgent = new https.Agent({ rejectUnauthorized: false })
+
+// Wrapper de fetch compatible con certificados auto-firmados.
+// Usa https/http de Node.js directamente en lugar del fetch nativo.
+export async function evolutionFetch(url: string, init?: RequestInit): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const secure = u.protocol === 'https:'
+    const req = (secure ? https : http).request(
+      {
+        hostname: u.hostname,
+        port: u.port || (secure ? 443 : 80),
+        path: u.pathname + u.search,
+        method: init?.method ?? 'GET',
+        headers: init?.headers as Record<string, string>,
+        agent: secure ? sslAgent : undefined,
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () =>
+          resolve(new Response(Buffer.concat(chunks), { status: res.statusCode ?? 200 }))
+        )
+      }
+    )
+    req.on('error', reject)
+    if (init?.signal) {
+      ;(init.signal as AbortSignal).addEventListener('abort', () => {
+        req.destroy()
+        reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }))
+      })
+    }
+    const body = init?.body
+    if (typeof body === 'string') req.write(body)
+    req.end()
+  })
+}
 
 // ── Cliente Evolution API ─────────────────────────────────────────────────────
 export class EvolutionAPIClient {
@@ -16,7 +58,7 @@ export class EvolutionAPIClient {
 
   private async fetch<T>(path: string, options?: RequestInit): Promise<T> {
     const url = `${this.apiUrl}${path}`
-    const res = await fetch(url, {
+    const res = await evolutionFetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -67,7 +109,7 @@ export class EvolutionAPIClient {
             return {
               id:          (chat.id ?? chat.remoteJid ?? '') as string,
               remoteJid:   (chat.remoteJid ?? chat.id ?? '') as string,
-              name:        (chat.name ?? chat.pushName ?? null) as string | null,
+              name:        (chat.name ?? null) as string | null,
               lastMessage: chat.lastMessage as EvolutionChat['lastMessage'],
             }
           }).filter(c => !!c.remoteJid)
@@ -228,11 +270,21 @@ export async function syncInstanceConversations(
         }, { onConflict: 'external_id', ignoreDuplicates: true })
       }
 
-      // Actualizar last_message_at con el timestamp real del mensaje más reciente
-      if (maxMsgTs > 0) {
+      // Actualizar last_message_at con el timestamp real del mensaje más reciente.
+      // Aprovechar el mismo UPDATE para completar client_name desde el pushName
+      // del primer mensaje entrante (fromMe=false), que sí corresponde al cliente.
+      const clientPushName = messages
+        .filter(msg => !msg.key.fromMe && msg.pushName)
+        .map(msg => msg.pushName!)[0] ?? null
+
+      const updatePayload: Record<string, string> = {}
+      if (maxMsgTs > 0) updatePayload.last_message_at = new Date(maxMsgTs).toISOString()
+      if (clientPushName && !conv.client_name) updatePayload.client_name = clientPushName
+
+      if (Object.keys(updatePayload).length > 0) {
         await supabase
           .from('conversations')
-          .update({ last_message_at: new Date(maxMsgTs).toISOString() })
+          .update(updatePayload)
           .eq('id', conv.id)
       }
 

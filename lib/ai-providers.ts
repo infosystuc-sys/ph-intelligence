@@ -10,6 +10,28 @@ export const AI_MODELS: Record<AIProvider, string> = {
   gemini: 'gemini-flash-latest',
 }
 
+// ── Retry con exponential backoff ─────────────────────────────────────────────
+const RETRYABLE = ['429', '503', '529', 'overloaded', 'rate', 'quota', 'Resource has been exhausted']
+
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 4, baseMs = 2000): Promise<T> {
+  let lastErr: unknown
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      const msg = String(err)
+      const retryable = RETRYABLE.some(s => msg.includes(s))
+      if (!retryable || i === maxAttempts - 1) throw err
+      // jitter: baseMs * 2^i ± 20%
+      const delay = baseMs * Math.pow(2, i) * (0.8 + Math.random() * 0.4)
+      console.warn(`[AI] intento ${i + 1} fallido, reintentando en ${Math.round(delay)}ms…`, msg.slice(0, 120))
+      await new Promise(r => setTimeout(r, delay))
+    }
+  }
+  throw lastErr
+}
+
 // ── Obtener proveedor activo desde Supabase ───────────────────────────────────
 export async function getActiveProvider(): Promise<AIProvider> {
   try {
@@ -63,16 +85,16 @@ async function callAnthropic(
   maxTokens: number
 ): Promise<string> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
-
-  const response = await client.messages.create({
-    model: AI_MODELS.anthropic,
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
+  return withRetry(async () => {
+    const response = await client.messages.create({
+      model: AI_MODELS.anthropic,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    })
+    const block = response.content[0]
+    return block.type === 'text' ? block.text : ''
   })
-
-  const block = response.content[0]
-  return block.type === 'text' ? block.text : ''
 }
 
 // ── Gemini ────────────────────────────────────────────────────────────────────
@@ -82,16 +104,16 @@ async function callGemini(
   maxTokens: number
 ): Promise<string> {
   const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! })
-
-  const response = await client.models.generateContent({
-    model: AI_MODELS.gemini,
-    contents: userPrompt,
-    config: {
-      systemInstruction: systemPrompt,
-      maxOutputTokens: maxTokens,
-      temperature: 0.3,
-    },
+  return withRetry(async () => {
+    const response = await client.models.generateContent({
+      model: AI_MODELS.gemini,
+      contents: userPrompt,
+      config: {
+        systemInstruction: systemPrompt,
+        maxOutputTokens: maxTokens,
+        temperature: 0.3,
+      },
+    })
+    return response.text ?? ''
   })
-
-  return response.text ?? ''
 }

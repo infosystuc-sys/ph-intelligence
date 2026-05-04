@@ -3,10 +3,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Upload, FileSpreadsheet, Trash2, CheckCircle, AlertCircle, X, Loader2, Eye, ChevronLeft, ChevronRight } from 'lucide-react'
 
+type Source = 'naranja' | 'cancela_renueva'
+
 type Batch = {
   batch_id: string
   periodo: string
   sucursal: string
+  source: string
   created_at: string
   count: number
 }
@@ -16,33 +19,39 @@ type ImportResult = {
   batch_id: string
 }
 
-type Record = {
+type BatchRecord = {
   id: string
   cod_cliente: string | null
   nombre_cliente: string | null
   cuit_dni: string | null
   telefono_1: string | null
   telefono_2: string | null
+  domicilio: string | null
+  cuotas_a_vencer: string | null
+}
+
+const SOURCE_LABELS: Record<Source, string> = {
+  naranja: 'Base Tarjeta Naranja',
+  cancela_renueva: 'Base Cancela y Renueva',
 }
 
 // ── Modal de registros ────────────────────────────────────────────────────────
 function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void }) {
-  const [records, setRecords] = useState<Record[]>([])
+  const [records, setRecords] = useState<BatchRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
   const PAGE_SIZE = 100
+  const isCancela = batch.source === 'cancela_renueva'
 
-  useEffect(() => {
-    loadPage(1)
-  }, [batch.batch_id])
+  useEffect(() => { loadPage(1) }, [batch.batch_id])
 
   const loadPage = async (p: number) => {
     setLoading(true)
     const res = await fetch(`/api/base-tn?batch_id=${batch.batch_id}&page=${p}`)
     const data = await res.json()
-    setRecords(data.data ?? [])
+    setRecords((data.data ?? []) as BatchRecord[])
     setTotal(data.total ?? 0)
     setPage(p)
     setLoading(false)
@@ -52,7 +61,7 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
 
   const filtered = search.trim()
     ? records.filter(r =>
-        [r.cod_cliente, r.nombre_cliente, r.cuit_dni, r.telefono_1, r.telefono_2]
+        [r.cod_cliente, r.nombre_cliente, r.cuit_dni, r.telefono_1, r.telefono_2, r.domicilio, r.cuotas_a_vencer]
           .some(v => v?.toLowerCase().includes(search.toLowerCase()))
       )
     : records
@@ -60,7 +69,6 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="bg-surface rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col">
-        {/* Header */}
         <div className="flex items-start justify-between px-6 py-4 border-b border-border shrink-0">
           <div>
             <h2 className="text-lg font-bold text-body">Registros del lote</h2>
@@ -74,13 +82,12 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
           </button>
         </div>
 
-        {/* Buscador */}
         <div className="px-6 py-3 border-b border-border shrink-0">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Buscar por nombre, código, CUIT o teléfono..."
+            placeholder="Buscar por nombre, DNI, teléfono..."
             className="w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-body focus:outline-none focus:ring-2 focus:ring-primary"
           />
           {search && (
@@ -90,7 +97,6 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
           )}
         </div>
 
-        {/* Tabla */}
         <div className="flex-1 overflow-auto">
           {loading ? (
             <div className="flex items-center justify-center gap-2 text-gray-400 text-sm py-16">
@@ -102,21 +108,45 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-bg border-b border-border">
                 <tr>
-                  <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Cód. Cliente</th>
-                  <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Nombre</th>
-                  <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">CUIT / DNI</th>
-                  <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Teléfono 1</th>
-                  <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Teléfono 2</th>
+                  {isCancela ? (
+                    <>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">DNI</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Nombre</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Domicilio</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Cuotas</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Teléfono</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Cód. Cliente</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Nombre</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">CUIT / DNI</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Teléfono 1</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Teléfono 2</th>
+                    </>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map(r => (
                   <tr key={r.id} className="hover:bg-bg transition-colors">
-                    <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{r.cod_cliente ?? '—'}</td>
-                    <td className="px-4 py-2.5 font-medium text-body">{r.nombre_cliente ?? '—'}</td>
-                    <td className="px-4 py-2.5 text-gray-500">{r.cuit_dni ?? '—'}</td>
-                    <td className="px-4 py-2.5 text-gray-500">{r.telefono_1 ?? '—'}</td>
-                    <td className="px-4 py-2.5 text-gray-500">{r.telefono_2 ?? '—'}</td>
+                    {isCancela ? (
+                      <>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{r.cuit_dni ?? '—'}</td>
+                        <td className="px-4 py-2.5 font-medium text-body">{r.nombre_cliente ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500 text-xs">{r.domicilio ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{r.cuotas_a_vencer ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{r.telefono_1 ?? '—'}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{r.cod_cliente ?? '—'}</td>
+                        <td className="px-4 py-2.5 font-medium text-body">{r.nombre_cliente ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{r.cuit_dni ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{r.telefono_1 ?? '—'}</td>
+                        <td className="px-4 py-2.5 text-gray-500">{r.telefono_2 ?? '—'}</td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -124,25 +154,18 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
           )}
         </div>
 
-        {/* Paginación */}
         {totalPages > 1 && !search && (
           <div className="flex items-center justify-between px-6 py-3 border-t border-border shrink-0">
             <p className="text-xs text-gray-400">
               Página {page} de {totalPages} · mostrando {((page - 1) * PAGE_SIZE) + 1}–{Math.min(page * PAGE_SIZE, total)} de {total.toLocaleString('es-AR')}
             </p>
             <div className="flex items-center gap-1">
-              <button
-                onClick={() => loadPage(page - 1)}
-                disabled={page === 1 || loading}
-                className="p-1.5 rounded border border-border text-gray-500 hover:bg-bg disabled:opacity-40 transition-colors"
-              >
+              <button onClick={() => loadPage(page - 1)} disabled={page === 1 || loading}
+                className="p-1.5 rounded border border-border text-gray-500 hover:bg-bg disabled:opacity-40 transition-colors">
                 <ChevronLeft size={14} />
               </button>
-              <button
-                onClick={() => loadPage(page + 1)}
-                disabled={page === totalPages || loading}
-                className="p-1.5 rounded border border-border text-gray-500 hover:bg-bg disabled:opacity-40 transition-colors"
-              >
+              <button onClick={() => loadPage(page + 1)} disabled={page === totalPages || loading}
+                className="p-1.5 rounded border border-border text-gray-500 hover:bg-bg disabled:opacity-40 transition-colors">
                 <ChevronRight size={14} />
               </button>
             </div>
@@ -156,6 +179,8 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
 // ── Página principal ──────────────────────────────────────────────────────────
 export default function BaseTNPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const [activeTab, setActiveTab] = useState<Source>('naranja')
 
   const [periodo, setPeriodo] = useState('')
   const [sucursal, setSucursal] = useState('')
@@ -172,6 +197,16 @@ export default function BaseTNPage() {
   const [viewingBatch, setViewingBatch] = useState<Batch | null>(null)
 
   useEffect(() => { loadBatches() }, [])
+
+  // Limpiar formulario al cambiar de pestaña
+  useEffect(() => {
+    setFile(null)
+    setPeriodo('')
+    setSucursal('')
+    setResult(null)
+    setError(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }, [activeTab])
 
   const loadBatches = async () => {
     setLoadingBatches(true)
@@ -200,6 +235,7 @@ export default function BaseTNPage() {
     formData.append('file', file)
     formData.append('periodo', periodo)
     formData.append('sucursal', sucursal)
+    formData.append('source', activeTab)
 
     const res = await fetch('/api/base-tn', { method: 'POST', body: formData })
     const data = await res.json()
@@ -223,6 +259,15 @@ export default function BaseTNPage() {
     await loadBatches()
   }
 
+  const filteredBatches = batches.filter(b =>
+    (b.source ?? 'naranja') === activeTab
+  )
+
+  const tabs: { id: Source; label: string; color: string }[] = [
+    { id: 'naranja',          label: 'Base Tarjeta Naranja',   color: 'text-orange-600' },
+    { id: 'cancela_renueva',  label: 'Base Cancela y Renueva', color: 'text-blue-600'   },
+  ]
+
   return (
     <>
       {viewingBatch && (
@@ -232,17 +277,34 @@ export default function BaseTNPage() {
       <div className="p-6 max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <div>
-          <h1 className="text-2xl font-bold text-body">Importar Base Tarjeta Naranja</h1>
+          <h1 className="text-2xl font-bold text-body">Importar Bases de Clientes</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Cargá el listado Excel de Tarjeta Naranja. Se saltearán automáticamente las primeras 5 filas.
+            Gestioná los padrones de Tarjeta Naranja y Base Cancela y Renueva.
           </p>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-border gap-1">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? `border-primary ${tab.color}`
+                  : 'border-transparent text-gray-500 hover:text-body'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Formulario de importación */}
         <div className="bg-surface rounded-lg border border-border shadow-sm p-6">
           <h2 className="font-semibold text-body mb-5 flex items-center gap-2">
             <FileSpreadsheet size={18} className="text-primary" />
-            Nueva importación
+            Nueva importación — {SOURCE_LABELS[activeTab]}
           </h2>
 
           <form onSubmit={handleImport} className="space-y-5">
@@ -275,6 +337,13 @@ export default function BaseTNPage() {
               </div>
             </div>
 
+            {activeTab === 'cancela_renueva' && (
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-md text-xs text-blue-700">
+                Campos que se importan: <strong>DNI · Nombre Completo · Domicilio · Cuotas a Vencer · Teléfono</strong>.
+                La primera fila de datos debe estar en la fila 4 del Excel.
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-body mb-1">
                 Archivo Excel <span className="text-red-500">*</span>
@@ -286,8 +355,8 @@ export default function BaseTNPage() {
                 onClick={() => fileInputRef.current?.click()}
                 className={`relative border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
                   dragging ? 'border-primary bg-primary/5'
-                  : file ? 'border-green-400 bg-green-50'
-                  : 'border-border hover:border-primary hover:bg-primary/5'
+                  : file   ? 'border-green-400 bg-green-50'
+                           : 'border-border hover:border-primary hover:bg-primary/5'
                 }`}
               >
                 <input
@@ -355,13 +424,15 @@ export default function BaseTNPage() {
 
         {/* Historial */}
         <div className="bg-surface rounded-lg border border-border shadow-sm p-6">
-          <h2 className="font-semibold text-body mb-4">Historial de importaciones</h2>
+          <h2 className="font-semibold text-body mb-4">
+            Historial — {SOURCE_LABELS[activeTab]}
+          </h2>
 
           {loadingBatches ? (
             <div className="flex items-center gap-2 text-gray-400 text-sm py-4">
               <Loader2 size={14} className="animate-spin" /> Cargando...
             </div>
-          ) : batches.length === 0 ? (
+          ) : filteredBatches.length === 0 ? (
             <p className="text-sm text-gray-400 py-4 text-center">No hay importaciones registradas aún</p>
           ) : (
             <div className="overflow-x-auto">
@@ -376,7 +447,7 @@ export default function BaseTNPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {batches.map(batch => (
+                  {filteredBatches.map(batch => (
                     <tr key={batch.batch_id} className="hover:bg-bg transition-colors">
                       <td className="px-4 py-3 font-medium text-body">{batch.periodo}</td>
                       <td className="px-4 py-3 text-gray-500">{batch.sucursal}</td>
@@ -393,16 +464,13 @@ export default function BaseTNPage() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-3">
-                          {/* Ver registros */}
                           <button
                             onClick={() => setViewingBatch(batch)}
                             className="flex items-center gap-1 text-xs text-primary hover:text-primary-dark font-medium transition-colors"
-                            title="Ver registros"
                           >
                             <Eye size={13} /> Ver
                           </button>
 
-                          {/* Eliminar */}
                           {confirmDelete === batch.batch_id ? (
                             <div className="flex items-center gap-1.5">
                               <span className="text-xs text-red-500">¿Eliminar?</span>

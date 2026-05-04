@@ -3,7 +3,7 @@
 // ============================================
 
 export type UserRole = 'admin' | 'supervisor' | 'vendedor'
-export type ConversationStatus = 'active' | 'closed' | 'pending'
+export type ConversationStatus = 'active' | 'closed' | 'pending' | 'historico'
 export type ConversationStage = 'new' | 'negotiation' | 'proposal' | 'closed_won' | 'closed_lost'
 export type MessageType = 'text' | 'image' | 'audio' | 'document'
 export type SentimentType = 'positive' | 'neutral' | 'negative'
@@ -47,6 +47,8 @@ export interface Conversation {
   client_name: string | null
   display_name: string | null
   client_phone: string
+  cod_cliente: string | null
+  base_source: string | null  // 'naranja' | 'cancela_renueva' | null
   vendedor?: User
   last_message?: Message
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -178,7 +180,8 @@ export interface ScoreBadgeProps {
 
 export interface ChatBubbleProps {
   message: Message
-  fromMe: boolean
+  vendorName?: string
+  clientName?: string
 }
 
 export interface PipelineBoardProps {

@@ -19,19 +19,25 @@ export default async function AnalysisPage({ params }: { params: Promise<{ id: s
 
   if (!analysis) notFound()
 
-  const { data: conversation } = await supabase
-    .from('conversations')
-    .select('client_name, client_phone, created_at, message_count')
-    .eq('id', analysis.conversation_id)
-    .single()
+  const [convRes, vendorRes, historyRes] = await Promise.all([
+    supabase
+      .from('conversations')
+      .select('client_name, client_phone, created_at, message_count')
+      .eq('id', analysis.conversation_id)
+      .single(),
+    supabase
+      .from('users')
+      .select('*')
+      .eq('id', analysis.vendedor_id)
+      .single(),
+    supabase
+      .from('ai_analyses')
+      .select('id, quality_score, analyzed_at')
+      .eq('conversation_id', analysis.conversation_id)
+      .order('analyzed_at', { ascending: true }),
+  ])
 
-  const { data: vendor } = await supabase
-    .from('users')
-    .select('*')
-    .eq('id', analysis.vendedor_id)
-    .single()
-
-  if (!conversation || !vendor) notFound()
+  if (!convRes.data || !vendorRes.data) notFound()
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -48,9 +54,11 @@ export default async function AnalysisPage({ params }: { params: Promise<{ id: s
 
       <AnalysisReport
         analysis={analysis}
-        conversation={conversation}
-        vendor={vendor}
+        conversation={convRes.data}
+        vendor={vendorRes.data}
         userRole={profile.role}
+        userId={profile.id}
+        allAnalyses={historyRes.data ?? []}
       />
     </div>
   )

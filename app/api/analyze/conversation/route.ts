@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Conversación no encontrada' }, { status: 404 })
     }
 
-    const result = await analyzeConversation(conversationId)
+    const result = await analyzeConversation(conversationId, 'manual')
 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 500 })

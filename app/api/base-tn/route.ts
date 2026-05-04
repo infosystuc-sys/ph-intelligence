@@ -32,23 +32,13 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ data, total: count ?? 0, page, page_size: PAGE_SIZE })
     }
 
-    // Sin batch_id → devolver historial agrupado por lote
-    const { data, error } = await service
-      .from('base_tn')
-      .select('batch_id, periodo, sucursal, created_at')
-      .order('created_at', { ascending: false })
+    // Sin batch_id → devolver historial agrupado por lote usando RPC
+    // (GROUP BY en la BD evita traer miles de filas individuales)
+    const { data, error } = await service.rpc('get_base_tn_batches')
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-    const batches: Record<string, { batch_id: string; periodo: string; sucursal: string; created_at: string; count: number }> = {}
-    for (const row of data ?? []) {
-      if (!batches[row.batch_id]) {
-        batches[row.batch_id] = { batch_id: row.batch_id, periodo: row.periodo, sucursal: row.sucursal, created_at: row.created_at, count: 0 }
-      }
-      batches[row.batch_id].count++
-    }
-
-    return NextResponse.json({ data: Object.values(batches) })
+    return NextResponse.json({ data: data ?? [] })
   } catch {
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })
   }
@@ -72,54 +62,85 @@ export async function POST(req: NextRequest) {
     }
 
     const formData = await req.formData()
-    const file = formData.get('file') as File | null
+    const file    = formData.get('file')    as File   | null
     const periodo = (formData.get('periodo') as string | null)?.trim()
     const sucursal = (formData.get('sucursal') as string | null)?.trim()
+    const source  = (formData.get('source')  as string | null)?.trim() ?? 'naranja'
 
-    if (!file) return NextResponse.json({ error: 'Archivo requerido' }, { status: 400 })
-    if (!periodo) return NextResponse.json({ error: 'El período es requerido' }, { status: 400 })
-    if (!sucursal) return NextResponse.json({ error: 'La sucursal es requerida' }, { status: 400 })
+    if (!file)     return NextResponse.json({ error: 'Archivo requerido' },          { status: 400 })
+    if (!periodo)  return NextResponse.json({ error: 'El período es requerido' },    { status: 400 })
+    if (!sucursal) return NextResponse.json({ error: 'La sucursal es requerida' },   { status: 400 })
+    if (!['naranja', 'cancela_renueva'].includes(source)) {
+      return NextResponse.json({ error: 'Fuente no válida' }, { status: 400 })
+    }
 
-    const buffer = await file.arrayBuffer()
+    const buffer   = await file.arrayBuffer()
     const workbook = XLSX.read(buffer, { type: 'array' })
-    const sheet = workbook.Sheets[workbook.SheetNames[0]]
+    const sheet    = workbook.Sheets[workbook.SheetNames[0]]
 
-    // Leer todas las filas como arrays (sin asumir cabeceras)
     const allRows = XLSX.utils.sheet_to_json<(string | number | null)[]>(sheet, {
       header: 1,
       defval: '',
       blankrows: false,
     })
 
-    // Saltar las primeras 4 filas (encabezados / metadata del Excel)
-    const dataRows = allRows.slice(4)
-
     const batchId = randomUUID()
+    type RowRecord = {
+      batch_id: string; periodo: string; sucursal: string; source: string
+      cod_cliente: string | null; nombre_cliente: string | null
+      cuit_dni: string | null; telefono_1: string | null; telefono_2: string | null
+      domicilio: string | null; cuotas_a_vencer: string | null
+      imported_by: string
+    }
 
-    const records = dataRows
-      .filter(row => Array.isArray(row) && row.some(cell => String(cell ?? '').trim() !== ''))
-      .map(row => {
-        // Col 0 = vacía (no tiene datos)
-        // Col 1 = COD.CLIENTE
-        // Col 2 = NOMBRE CLIENTE
-        // Col 3 = CUIT/DNI
-        // Col 4 = TELEFONO 1
-        // Col 5 = TELEFONO 2
-        const r = row as (string | number | null)[]
-        // SheetJS omite col A (vacía) → los índices reales son 0-based desde col B
-        return {
-          batch_id:       batchId,
-          periodo,
-          sucursal,
-          cod_cliente:    String(r[0] ?? '').trim() || null,
-          nombre_cliente: String(r[1] ?? '').trim() || null,
-          cuit_dni:       String(r[2] ?? '').trim() || null,
-          telefono_1:     String(r[3] ?? '').trim() || null,
-          telefono_2:     String(r[4] ?? '').trim() || null,
-          imported_by:    user.id,
-        }
-      })
-      .filter(r => r.cod_cliente || r.nombre_cliente)
+    let records: RowRecord[]
+
+    if (source === 'cancela_renueva') {
+      // Fila 1 vacía (eliminada por blankrows:false), Fila 2 = "JVG", Fila 3 = headers
+      // → datos desde índice 2 del array filtrado
+      // Col A vacía → SheetJS arranca en col B (índice 0)
+      // 0 = DNI | 1 = Nombre Completo | 2 = Domicilio | 3 = Cuotas a Vencer | 4 = Teléfono
+      records = allRows
+        .slice(2)
+        .filter(row => Array.isArray(row) && row.some(cell => String(cell ?? '').trim() !== ''))
+        .map(row => {
+          const r = row as (string | number | null)[]
+          return {
+            batch_id: batchId, periodo, sucursal, source,
+            cod_cliente:     null,
+            cuit_dni:        String(r[0] ?? '').trim() || null,
+            nombre_cliente:  String(r[1] ?? '').trim() || null,
+            domicilio:       String(r[2] ?? '').trim() || null,
+            cuotas_a_vencer: String(r[3] ?? '').trim() || null,
+            telefono_1:      String(r[4] ?? '').trim() || null,
+            telefono_2:      null,
+            imported_by:     user.id,
+          }
+        })
+        .filter(r => r.cuit_dni || r.nombre_cliente)
+    } else {
+      // Naranja: primeras 4 filas son encabezados
+      // Col A vacía → SheetJS arranca en col B (índice 0)
+      // 0 = COD.CLIENTE | 1 = NOMBRE | 2 = CUIT/DNI | 3 = TEL 1 | 4 = TEL 2
+      records = allRows
+        .slice(4)
+        .filter(row => Array.isArray(row) && row.some(cell => String(cell ?? '').trim() !== ''))
+        .map(row => {
+          const r = row as (string | number | null)[]
+          return {
+            batch_id: batchId, periodo, sucursal, source: 'naranja',
+            cod_cliente:    String(r[0] ?? '').trim() || null,
+            nombre_cliente: String(r[1] ?? '').trim() || null,
+            cuit_dni:       String(r[2] ?? '').trim() || null,
+            telefono_1:     String(r[3] ?? '').trim() || null,
+            telefono_2:     String(r[4] ?? '').trim() || null,
+            domicilio:      null,
+            cuotas_a_vencer: null,
+            imported_by:    user.id,
+          }
+        })
+        .filter(r => r.cod_cliente || r.nombre_cliente)
+    }
 
     if (records.length === 0) {
       return NextResponse.json({ error: 'No se encontraron registros válidos en el archivo' }, { status: 400 })

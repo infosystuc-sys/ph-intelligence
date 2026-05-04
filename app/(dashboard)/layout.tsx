@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { getServerUserProfile } from '@/lib/supabase-server'
-import Sidebar from '@/components/dashboard/Sidebar'
+import DashboardShell from '@/components/dashboard/DashboardShell'
 
 export default async function DashboardLayout({
   children,
@@ -13,12 +13,5 @@ export default async function DashboardLayout({
     redirect('/login')
   }
 
-  return (
-    <div className="flex h-screen bg-bg overflow-hidden">
-      <Sidebar user={profile} />
-      <main className="flex-1 overflow-auto">
-        {children}
-      </main>
-    </div>
-  )
+  return <DashboardShell user={profile}>{children}</DashboardShell>
 }

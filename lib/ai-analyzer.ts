@@ -31,12 +31,16 @@ Criterios de evaluación del quality_score:
 Responde ÚNICAMENTE con el JSON, sin texto adicional.`
 
 // ── Motor de Análisis IA ──────────────────────────────────────────────────────
-export async function analyzeConversation(conversationId: string): Promise<{
+export async function analyzeConversation(
+  conversationId: string,
+  triggeredBy: 'auto' | 'manual' = 'auto',
+): Promise<{
   success: boolean
   analysisId?: string
   error?: string
 }> {
   const supabase = createServiceSupabaseClient()
+  const startTime = Date.now()
 
   // 1. Obtener conversación con mensajes
   const { data: conversation, error: convError } = await supabase
@@ -46,6 +50,13 @@ export async function analyzeConversation(conversationId: string): Promise<{
     .single()
 
   if (convError || !conversation) {
+    await supabase.from('analysis_logs').insert({
+      conversation_id: conversationId,
+      triggered_by: triggeredBy,
+      status: 'error',
+      error_message: 'Conversación no encontrada',
+      duration_ms: Date.now() - startTime,
+    })
     return { success: false, error: 'Conversación no encontrada' }
   }
 
@@ -56,10 +67,26 @@ export async function analyzeConversation(conversationId: string): Promise<{
     .order('msg_timestamp', { ascending: true })
 
   if (msgError) {
+    await supabase.from('analysis_logs').insert({
+      conversation_id: conversationId,
+      vendedor_id: conversation.vendedor_id,
+      triggered_by: triggeredBy,
+      status: 'error',
+      error_message: 'Error al obtener mensajes',
+      duration_ms: Date.now() - startTime,
+    })
     return { success: false, error: 'Error al obtener mensajes' }
   }
 
   if (!messages || messages.length === 0) {
+    await supabase.from('analysis_logs').insert({
+      conversation_id: conversationId,
+      vendedor_id: conversation.vendedor_id,
+      triggered_by: triggeredBy,
+      status: 'error',
+      error_message: 'No hay mensajes para analizar',
+      duration_ms: Date.now() - startTime,
+    })
     return { success: false, error: 'No hay mensajes para analizar' }
   }
 
@@ -97,7 +124,18 @@ Genera el análisis completo en JSON.`
 
     analysisData = JSON.parse(jsonStr) as AIAnalysisResponse
   } catch (e) {
-    return { success: false, error: `Error en análisis IA (${provider}): ${String(e)}` }
+    const errMsg = `Error en análisis IA (${provider}): ${String(e)}`
+    await supabase.from('analysis_logs').insert({
+      conversation_id: conversationId,
+      vendedor_id: conversation.vendedor_id,
+      triggered_by: triggeredBy,
+      status: 'error',
+      model_used: AI_MODELS[provider],
+      error_message: errMsg.slice(0, 500),
+      duration_ms: Date.now() - startTime,
+      message_count: messages.length,
+    })
+    return { success: false, error: errMsg }
   }
 
   // 4. Validar y sanitizar datos
@@ -127,14 +165,40 @@ Genera el análisis completo en JSON.`
     .single()
 
   if (saveError) {
+    await supabase.from('analysis_logs').insert({
+      conversation_id: conversationId,
+      vendedor_id: conversation.vendedor_id,
+      triggered_by: triggeredBy,
+      status: 'error',
+      model_used: AI_MODELS[provider],
+      error_message: 'Error al guardar el análisis en la base de datos',
+      duration_ms: Date.now() - startTime,
+      message_count: messages.length,
+    })
     return { success: false, error: 'Error al guardar el análisis' }
   }
 
-  // 6. Actualizar conversation_stage en la conversación
-  await supabase
-    .from('conversations')
-    .update({ status: 'active' })
-    .eq('id', conversationId)
+  // Log de éxito
+  await supabase.from('analysis_logs').insert({
+    conversation_id: conversationId,
+    vendedor_id: conversation.vendedor_id,
+    triggered_by: triggeredBy,
+    status: 'success',
+    analysis_id: savedAnalysis.id,
+    model_used: AI_MODELS[provider],
+    duration_ms: Date.now() - startTime,
+    message_count: messages.length,
+  })
+
+  // 6. Si la IA detecta conversación cerrada → pasar a historico automáticamente
+  const isClosed = ['closed_won', 'closed_lost'].includes(safeAnalysis.conversation_stage)
+  if (isClosed) {
+    await supabase
+      .from('conversations')
+      .update({ status: 'historico' })
+      .eq('id', conversationId)
+      .neq('status', 'historico')
+  }
 
   // 7. Actualizar KPIs del día
   await updateDailyKpis(conversation.vendedor_id)

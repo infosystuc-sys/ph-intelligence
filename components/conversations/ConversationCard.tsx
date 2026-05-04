@@ -5,7 +5,7 @@ import { Conversation } from '@/types'
 import ScoreBadge from '@/components/ui/ScoreBadge'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import { formatDistanceToNow, formatPhone } from '@/lib/utils'
-import { Users, Pencil, Check, X } from 'lucide-react'
+import { Users, Pencil, Check, X, CreditCard } from 'lucide-react'
 
 const statusLabel: Record<string, string> = {
   active: 'Activa',
@@ -23,16 +23,23 @@ interface ConversationCardProps {
   conversation: Conversation
   onClick: () => void
   selected?: boolean
-  codCliente?: string
+  codCliente?: string | null
+  baseSource?: string | null
   onSaveName?: (conversationId: string, displayName: string | null) => Promise<void>
+  checkable?: boolean
+  checked?: boolean
+  onCheck?: () => void
 }
 
-export default function ConversationCard({ conversation, onClick, selected, codCliente, onSaveName }: ConversationCardProps) {
+export default function ConversationCard({ conversation, onClick, selected, codCliente, baseSource, onSaveName, checkable, checked, onCheck }: ConversationCardProps) {
   const isGroup = conversation.remote_jid?.endsWith('@g.us') ?? false
 
-  const analysis = Array.isArray(conversation.ai_analysis)
-    ? conversation.ai_analysis[0]
-    : conversation.ai_analysis
+  const analyses = (Array.isArray(conversation.ai_analysis)
+    ? conversation.ai_analysis
+    : conversation.ai_analysis ? [conversation.ai_analysis] : []) as Array<{ id: string; quality_score: number; analyzed_at: string }>
+  const analysis = analyses.sort((a, b) =>
+    new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime()
+  )[0] ?? null
 
   const lastMsg = conversation.last_message?.content ?? '—'
   const preview = lastMsg.length > 60 ? lastMsg.slice(0, 60) + '...' : lastMsg
@@ -83,15 +90,31 @@ export default function ConversationCard({ conversation, onClick, selected, codC
     }
   }
 
-  const resolvedCodCliente = codCliente
+  const resolvedCodCliente = conversation.cod_cliente ?? codCliente ?? null
+  const resolvedBaseSource = conversation.base_source ?? baseSource ?? null
+
+  const handleClick = () => {
+    if (checkable) { onCheck?.(); return }
+    if (!editing) onClick()
+  }
 
   return (
     <div
-      onClick={editing ? undefined : onClick}
+      onClick={handleClick}
       className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors border-b border-border last:border-b-0 ${
-        selected ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-bg'
-      } ${editing ? 'cursor-default' : ''}`}
+        checkable && checked ? 'bg-primary/10 border-l-2 border-l-primary' :
+        !checkable && selected ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-bg'
+      } ${editing && !checkable ? 'cursor-default' : ''}`}
     >
+      {/* Checkbox en modo selección */}
+      {checkable && (
+        <div className={`w-4 h-4 rounded border-2 shrink-0 flex items-center justify-center transition-colors ${
+          checked ? 'bg-primary border-primary' : 'border-gray-300 bg-white'
+        }`}>
+          {checked && <Check size={10} className="text-white" />}
+        </div>
+      )}
+
       {/* Avatar del cliente (inicial) — grupos con ícono distinto */}
       <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
         isGroup ? 'bg-blue-100 text-blue-600' : 'bg-gray-200 text-gray-600'
@@ -148,9 +171,6 @@ export default function ConversationCard({ conversation, onClick, selected, codC
             {!isGroup && (
               <span className="text-[10px] text-gray-400 block leading-tight">
                 {formattedPhone}
-                {resolvedCodCliente && (
-                  <span className="ml-1.5 text-primary font-medium">#{resolvedCodCliente}</span>
-                )}
               </span>
             )}
           </div>
@@ -166,10 +186,24 @@ export default function ConversationCard({ conversation, onClick, selected, codC
           </div>
         </div>
 
-        <div className="flex items-center gap-2 mt-1">
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
           {isGroup && (
             <span className="flex items-center gap-0.5 text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full font-medium">
               <Users size={10} /> Grupo
+            </span>
+          )}
+          {resolvedBaseSource && (
+            <span className={`flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${
+              resolvedBaseSource === 'cancela_renueva'
+                ? 'bg-teal-100 text-teal-700'
+                : 'bg-orange-100 text-orange-700'
+            }`}>
+              <CreditCard size={9} />
+              {resolvedBaseSource === 'cancela_renueva'
+                ? 'C&R'
+                : resolvedCodCliente
+                  ? `#${resolvedCodCliente}`
+                  : 'Naranja'}
             </span>
           )}
           {conversation.vendedor && (
