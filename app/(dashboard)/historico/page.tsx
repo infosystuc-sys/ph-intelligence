@@ -26,22 +26,46 @@ export default function HistoricoPage() {
   const [working, setWorking] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
+  const [loadError, setLoadError] = useState('')
+  const [dbCount, setDbCount] = useState<number | null>(null)
+
+  // Cuenta directa desde Supabase para diagnosticar si hay datos en la DB
+  const checkDbCount = useCallback(async () => {
+    const { count } = await supabase
+      .from('conversations')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'historico')
+    setDbCount(count ?? 0)
+  }, [supabase])
+
   const loadConversations = useCallback(async () => {
     setLoading(true)
-    const res = await fetch('/api/conversations?status=historico&limit=200')
-    const data = await res.json()
-    setConversations(data.data ?? [])
-    setLoading(false)
+    setLoadError('')
+    try {
+      const res = await fetch('/api/conversations?status=historico&limit=500')
+      const data = await res.json()
+      if (!res.ok || data.error) {
+        setLoadError(data.error ?? 'Error al cargar el histórico')
+        setConversations([])
+      } else {
+        setConversations(data.data ?? [])
+      }
+    } catch {
+      setLoadError('Error de conexión al cargar el histórico')
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
     loadConversations()
+    checkDbCount()
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) return
       supabase.from('users').select('role').eq('id', user.id).single()
         .then(({ data }) => { if (data) setUserRole(data.role) })
     })
-  }, [loadConversations, supabase])
+  }, [loadConversations, checkDbCount, supabase])
 
   const canManage = ['admin', 'supervisor'].includes(userRole)
 
@@ -112,10 +136,12 @@ export default function HistoricoPage() {
   const filtered = conversations.filter(c => {
     if (!search) return true
     const q = search.toLowerCase()
-    const name = c.display_name ?? c.client_name ?? ''
+    const name = c.base_cliente ?? c.display_name ?? c.client_name ?? ''
     return (
       name.toLowerCase().includes(q) ||
       c.client_phone.toLowerCase().includes(q) ||
+      (c.base_cuit_dni ?? '').toLowerCase().includes(q) ||
+      (c.base_localidad ?? '').toLowerCase().includes(q) ||
       (c.vendedor?.full_name ?? '').toLowerCase().includes(q)
     )
   })
@@ -149,6 +175,34 @@ export default function HistoricoPage() {
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Actualizar
         </button>
       </div>
+
+      {/* Error de carga */}
+      {loadError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700 space-y-1">
+          <p className="font-semibold">Error al cargar</p>
+          <p>{loadError}</p>
+        </div>
+      )}
+
+      {/* Diagnóstico: si la API devuelve vacío pero la DB tiene datos, hay un problema de permisos/constraint */}
+      {!loading && !loadError && conversations.length === 0 && dbCount !== null && dbCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg px-4 py-3 text-sm text-amber-800 space-y-1">
+          <p className="font-semibold">⚠ Diagnóstico: la base de datos tiene {dbCount} conversaciones en histórico pero la API no las devuelve.</p>
+          <p>Esto indica un problema de permisos (RLS) o un constraint en la columna <code>status</code>.</p>
+          <p className="font-mono text-xs bg-amber-100 px-2 py-1 rounded mt-1">
+            Ejecutá en Supabase SQL Editor: <br />
+            SELECT DISTINCT status FROM conversations;
+          </p>
+        </div>
+      )}
+
+      {!loading && !loadError && conversations.length === 0 && dbCount === 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-700">
+          <p className="font-semibold">Sin conversaciones en histórico</p>
+          <p className="mt-0.5">Todavía no hay conversaciones archivadas. Podés archivarlas desde <strong>Conversaciones</strong> (modo selección) o desde <strong>Configuración → Mantenimiento</strong>.</p>
+          <p className="mt-1 text-xs">Si intentaste archivar y no funcionó, ejecutá en Supabase SQL Editor la migración <code>supabase/fix_conversations_status_historico.sql</code>.</p>
+        </div>
+      )}
 
       {/* Toolbar de selección */}
       {canManage && selectionMode && (
@@ -234,7 +288,7 @@ export default function HistoricoPage() {
       ) : (
         <div className="bg-surface rounded-lg border border-border divide-y divide-border overflow-hidden">
           {filtered.map(conv => {
-            const displayName = conv.display_name ?? conv.client_name ?? conv.client_phone
+            const displayName = conv.base_cliente ?? conv.display_name ?? conv.client_name ?? conv.client_phone
             const score = latestScore(conv)
             const isChecked = selectedIds.has(conv.id)
             const isWorking = working === conv.id
@@ -269,28 +323,46 @@ export default function HistoricoPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-sm text-body truncate">{displayName}</span>
                     {score !== null && <ScoreBadge score={score} size="sm" />}
-                    {conv.base_source && (
-                      <span className={`flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                        conv.base_source === 'cancela_renueva'
-                          ? 'bg-teal-100 text-teal-700'
-                          : 'bg-orange-100 text-orange-700'
-                      }`}>
-                        <CreditCard size={9} />
-                        {conv.base_source === 'cancela_renueva'
-                          ? 'C&R'
-                          : conv.cod_cliente ? `#${conv.cod_cliente}` : 'Naranja'}
-                      </span>
+                    {(conv.base_cliente || conv.base_localidad || (conv.base_tarjetas && conv.base_tarjetas.length > 0)) && (() => {
+                      const primary = conv.base_tarjetas?.[0] ?? null
+                      const extra = Math.max(0, (conv.base_tarjetas?.length ?? 0) - 1)
+                      const tooltip = [
+                        conv.base_cliente     && `Cliente: ${conv.base_cliente}`,
+                        conv.base_cuit_dni    && `CUIT/DNI: ${conv.base_cuit_dni}`,
+                        conv.base_localidad   && `Localidad: ${conv.base_localidad}`,
+                        (conv.base_tarjetas?.length ?? 0) > 0 && `Tarjetas: ${conv.base_tarjetas?.join(', ')}`,
+                        conv.base_observacion && `Obs: ${conv.base_observacion}`,
+                      ].filter(Boolean).join('\n')
+                      return (
+                        <>
+                          <span
+                            className="flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200"
+                            title={tooltip}
+                          >
+                            <CreditCard size={9} />
+                            {conv.base_localidad ?? 'Cliente'}
+                            {primary && <span className="font-normal opacity-80"> · {primary}</span>}
+                            {extra > 0 && <span className="font-normal opacity-80"> +{extra}</span>}
+                          </span>
+                          {conv.base_cuit_dni && (
+                            <span className="text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded-full" title={tooltip}>
+                              DNI {conv.base_cuit_dni}
+                            </span>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-gray-400 flex-wrap">
+                    <span>{formatPhone(conv.client_phone)}</span>
+                    {conv.vendedor && (
+                      <>
+                        <span>·</span>
+                        <VendorAvatar vendor={conv.vendedor} size="sm" />
+                        <span>{conv.vendedor.full_name.split(' ')[0]}</span>
+                      </>
                     )}
                   </div>
-                  <p className="text-xs text-gray-400">
-                    {formatPhone(conv.client_phone)}
-                    {conv.vendedor && (
-                      <span className="ml-2 flex items-center gap-1 inline-flex">
-                        · <VendorAvatar vendor={conv.vendedor} size="sm" />
-                        {conv.vendedor.full_name.split(' ')[0]}
-                      </span>
-                    )}
-                  </p>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {conv.message_count} mensajes
                     {conv.last_message_at && ` · último: ${formatDistanceToNow(new Date(conv.last_message_at))}`}

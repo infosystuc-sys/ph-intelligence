@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { User, WhatsappInstance } from '@/types'
 import VendorAvatar from '@/components/ui/VendorAvatar'
-import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2, ScrollText, AlertCircle, Clock } from 'lucide-react'
+import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2, ScrollText, AlertCircle, Clock, Archive, Filter } from 'lucide-react'
 import type { AIProvider } from '@/lib/ai-providers'
 import { formatDistanceToNow } from '@/lib/utils'
 import { useRouter } from 'next/navigation'
@@ -14,10 +14,11 @@ export default function SettingsPage() {
   const router = useRouter()
   const supabase = createBrowserSupabaseClient()
   const syncCtx = useSyncContext()
-  const [activeTab, setActiveTab] = useState<'users' | 'instances' | 'ia' | 'api' | 'logs'>('users')
+  const [activeTab, setActiveTab] = useState<'users' | 'instances' | 'ia' | 'api' | 'logs' | 'maintenance'>('users')
   const [aiProvider, setAiProvider] = useState<AIProvider>('anthropic')
   const [savingProvider, setSavingProvider] = useState(false)
   const [providerSaved, setProviderSaved] = useState(false)
+  const [providerError, setProviderError] = useState<string | null>(null)
 
   // Instancias
   const [showNewInstance, setShowNewInstance] = useState(false)
@@ -60,13 +61,21 @@ export default function SettingsPage() {
   const [recalculating, setRecalculating] = useState(false)
   const [recalcMsg, setRecalcMsg] = useState('')
 
-  // Vincular bases con conversaciones
-  type MatchItem = { name: string; phone: string; cod_cliente: string | null; source: string }
-  type MatchReport = { matched: number; naranja: number; cancela_renueva: number; items: MatchItem[] }
+  // Vincular base de clientes con conversaciones
+  type MatchItem = {
+    conversation_id: string
+    phone:           string
+    whatsapp_name:   string | null
+    cliente:         string | null
+    cuit_dni:        string | null
+    localidad:       string | null
+    tarjetas:        string[]
+    observacion:     string | null
+  }
+  type MatchReport = { matched: number; items: MatchItem[] }
   const [matching, setMatching] = useState(false)
   const [matchReport, setMatchReport] = useState<MatchReport | null>(null)
   const [matchError, setMatchError] = useState('')
-  const [matchSourceFilter, setMatchSourceFilter] = useState<'all' | 'naranja' | 'cancela_renueva'>('all')
 
   // Logs IA
   type AnalysisLog = {
@@ -87,6 +96,8 @@ export default function SettingsPage() {
   const [logsVendorFilter, setLogsVendorFilter] = useState('')
   const [settingsLogs, setSettingsLogs] = useState<AnalysisLog[]>([])
   const [loadingSettingsLogs, setLoadingSettingsLogs] = useState(false)
+  const [confirmDeleteLogs, setConfirmDeleteLogs] = useState<'vendor' | 'all' | null>(null)
+  const [deletingLogs, setDeletingLogs] = useState(false)
 
   useEffect(() => {
     checkAdminAccess()
@@ -189,17 +200,31 @@ export default function SettingsPage() {
   const saveProvider = async (provider: AIProvider) => {
     setSavingProvider(true)
     setProviderSaved(false)
-    const res = await fetch('/api/config', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ai_provider: provider }),
-    })
-    if (res.ok) {
+    setProviderError(null)
+    try {
+      const res = await fetch('/api/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_provider: provider }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setProviderError(data.error ?? `HTTP ${res.status}`)
+        return
+      }
+      // Confirmar leyendo de la DB que efectivamente se guardó
+      const verifyRes = await fetch('/api/config', { cache: 'no-store' })
+      const verifyData = await verifyRes.json()
+      if (verifyData.ai_provider !== provider) {
+        setProviderError(`El servidor respondió OK pero la DB sigue con "${verifyData.ai_provider}". Posible problema de RLS o service role.`)
+        return
+      }
       setAiProvider(provider)
       setProviderSaved(true)
       setTimeout(() => setProviderSaved(false), 3000)
+    } finally {
+      setSavingProvider(false)
     }
-    setSavingProvider(false)
   }
 
   const loadRemoteInstances = async () => {
@@ -246,13 +271,12 @@ export default function SettingsPage() {
     setMatching(true)
     setMatchReport(null)
     setMatchError('')
-    const res = await fetch('/api/base-tn/match-retroactive', { method: 'POST' })
+    const res = await fetch('/api/base-clientes/match-retroactive', { method: 'POST' })
     const data = await res.json()
     if (data.error) {
       setMatchError(data.error)
     } else {
       setMatchReport(data)
-      setMatchSourceFilter('all')
     }
     setMatching(false)
   }
@@ -265,6 +289,19 @@ export default function SettingsPage() {
     setRecalcMsg(data.error ?? `Recalculadas ${data.updated} de ${data.total} conversaciones.`)
     setRecalculating(false)
     await loadData()
+  }
+
+  const deleteLogs = async (scope: 'vendor' | 'all') => {
+    setDeletingLogs(true)
+    const body = scope === 'all' ? { all: true } : { vendedorId: logsVendorFilter }
+    await fetch('/api/analyze/logs', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    setDeletingLogs(false)
+    setConfirmDeleteLogs(null)
+    setSettingsLogs([])
   }
 
   const loadSettingsLogs = async (vendedorId?: string) => {
@@ -294,14 +331,95 @@ export default function SettingsPage() {
     setResetting(false)
   }
 
+  // ── Mantenimiento: archivo masivo ────────────────────────────────────────────
+  const [archUnrespondedClient, setArchUnrespondedClient] = useState(false)
+  const [archMaxMessages, setArchMaxMessages] = useState<string>('')
+  const [archMinInactiveDays, setArchMinInactiveDays] = useState<string>('')
+  const [archDateFrom, setArchDateFrom] = useState('')
+  const [archDateTo, setArchDateTo] = useState('')
+  type ArchPreviewRow = { id: string; name: string; client_phone: string; message_count: number; last_message_at: string | null }
+  const [archPreview, setArchPreview] = useState<ArchPreviewRow[] | null>(null)
+  const [archCount, setArchCount] = useState<number | null>(null)
+  const [archWorking, setArchWorking] = useState(false)
+  const [archConfirm, setArchConfirm] = useState(false)
+  const [archResult, setArchResult] = useState<{ archived: number } | null>(null)
+  const [archError, setArchError] = useState('')
+
+  const buildArchiveBody = (dryRun: boolean) => ({
+    dryRun,
+    unrespondedByClient: archUnrespondedClient || undefined,
+    maxMessages: archMaxMessages ? parseInt(archMaxMessages) : undefined,
+    minInactiveDays: archMinInactiveDays ? parseInt(archMinInactiveDays) : undefined,
+    dateFrom: archDateFrom || undefined,
+    dateTo: archDateTo || undefined,
+  })
+
+  const previewArchive = async () => {
+    setArchWorking(true)
+    setArchError('')
+    setArchPreview(null)
+    setArchCount(null)
+    setArchConfirm(false)
+    setArchResult(null)
+    const res = await fetch('/api/conversations/bulk-archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildArchiveBody(true)),
+    })
+    const data = await res.json()
+    setArchWorking(false)
+    if (data.error) { setArchError(data.error); return }
+    setArchCount(data.count)
+    setArchPreview(data.preview ?? [])
+  }
+
+  const executeArchive = async () => {
+    setArchWorking(true)
+    setArchError('')
+    const res = await fetch('/api/conversations/bulk-archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildArchiveBody(false)),
+    })
+    const data = await res.json()
+    setArchWorking(false)
+    if (data.error) { setArchError(data.error); return }
+    setArchResult({ archived: data.archived })
+    setArchConfirm(false)
+    setArchPreview(null)
+    setArchCount(null)
+  }
+
+  // ── Archivar todo ────────────────────────────────────────────────────────────
+  const [archAllConfirm, setArchAllConfirm] = useState(false)
+  const [archAllWorking, setArchAllWorking] = useState(false)
+  const [archAllResult, setArchAllResult] = useState<{ archived: number } | null>(null)
+  const [archAllError, setArchAllError] = useState('')
+
+  const executeArchiveAll = async () => {
+    setArchAllWorking(true)
+    setArchAllError('')
+    const res = await fetch('/api/conversations/bulk-archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archiveAll: true }),
+    })
+    const data = await res.json()
+    setArchAllWorking(false)
+    if (data.error) { setArchAllError(data.error); return }
+    setArchAllResult({ archived: data.archived })
+    setArchAllConfirm(false)
+  }
+
   const supervisors = users.filter(u => u.role === 'supervisor')
 
   const tabs = [
-    { id: 'users', label: 'Usuarios' },
-    { id: 'instances', label: 'Instancias WhatsApp' },
-    { id: 'ia', label: 'Proveedor IA' },
-    { id: 'api', label: 'API Keys' },
-    { id: 'logs', label: 'Logs IA' },
+    { id: 'users',       label: 'Usuarios' },
+    { id: 'instances',   label: 'Instancias WhatsApp' },
+    { id: 'ia',          label: 'Proveedor IA' },
+    { id: 'api',         label: 'API Keys' },
+    { id: 'logs',        label: 'Logs IA' },
+    { id: 'maintenance', label: 'Mantenimiento' },
   ] as const
 
   return (
@@ -433,80 +551,57 @@ export default function SettingsPage() {
 
             {matchReport && (
               <div className="space-y-3">
-                {/* Resumen */}
                 <div className="flex items-center gap-4 p-3 bg-green-50 border border-green-200 rounded-lg">
                   <div className="text-center">
                     <p className="text-2xl font-bold text-green-700">{matchReport.matched}</p>
-                    <p className="text-xs text-green-600">Total vinculadas</p>
-                  </div>
-                  <div className="w-px h-10 bg-green-200" />
-                  <div className="text-center">
-                    <p className="text-lg font-bold text-orange-600">{matchReport.naranja}</p>
-                    <p className="text-xs text-orange-500">Base Naranja</p>
-                  </div>
-                  <div className="w-px h-10 bg-green-200" />
-                  <div className="text-center">
-                    <p className="text-lg font-bold text-teal-600">{matchReport.cancela_renueva}</p>
-                    <p className="text-xs text-teal-500">Cancela y Renueva</p>
+                    <p className="text-xs text-green-600">Conversaciones vinculadas</p>
                   </div>
                 </div>
 
-                {/* Filtros */}
                 {matchReport.matched > 0 && (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-gray-500">Filtrar:</span>
-                      {(['all', 'naranja', 'cancela_renueva'] as const).map(f => (
-                        <button
-                          key={f}
-                          onClick={() => setMatchSourceFilter(f)}
-                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                            matchSourceFilter === f
-                              ? 'bg-primary text-white border-primary'
-                              : 'border-border text-gray-500 hover:border-primary/40'
-                          }`}
-                        >
-                          {f === 'all' ? 'Todas' : f === 'naranja' ? 'Naranja' : 'C&R'}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Tabla */}
-                    <div className="border border-border rounded-lg overflow-hidden max-h-72 overflow-y-auto">
-                      <table className="w-full text-xs">
-                        <thead className="bg-bg sticky top-0">
-                          <tr>
-                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Nombre</th>
-                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Teléfono</th>
-                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Cód. Cliente</th>
-                            <th className="text-left px-3 py-2 text-gray-500 font-medium">Base</th>
+                  <div className="border border-border rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-bg sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">Cliente (CSV)</th>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">DNI/CUIT</th>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">Teléfono</th>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">Localidad</th>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">Tarjetas</th>
+                          <th className="text-left px-3 py-2 text-gray-500 font-medium">Observación</th>
+                          <th className="px-3 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {matchReport.items.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-bg">
+                            <td className="px-3 py-2 text-body font-medium truncate max-w-44">
+                              {item.cliente ?? '—'}
+                              {item.whatsapp_name && item.whatsapp_name !== item.cliente && (
+                                <div className="text-[10px] text-gray-400 font-normal truncate">
+                                  WhatsApp: {item.whatsapp_name}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 font-mono text-gray-600">{item.cuit_dni ?? '—'}</td>
+                            <td className="px-3 py-2 font-mono text-gray-500">{item.phone}</td>
+                            <td className="px-3 py-2">{item.localidad ?? '—'}</td>
+                            <td className="px-3 py-2 text-gray-600 truncate max-w-32">{item.tarjetas.join(', ') || '—'}</td>
+                            <td className="px-3 py-2 text-gray-500 italic truncate max-w-44">{item.observacion ?? ''}</td>
+                            <td className="px-3 py-2">
+                              <button
+                                onClick={() => router.push(`/conversations?id=${item.conversation_id}`)}
+                                className="flex items-center gap-1 text-xs text-primary hover:text-primary-dark font-medium whitespace-nowrap"
+                                title="Ir a la conversación"
+                              >
+                                Ver chat
+                              </button>
+                            </td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-border">
-                          {matchReport.items
-                            .filter(i => matchSourceFilter === 'all' || i.source === matchSourceFilter)
-                            .map((item, idx) => (
-                              <tr key={idx} className="hover:bg-bg">
-                                <td className="px-3 py-2 text-body truncate max-w-[160px]">{item.name}</td>
-                                <td className="px-3 py-2 text-gray-500">{item.phone}</td>
-                                <td className="px-3 py-2 font-medium text-primary">
-                                  {item.cod_cliente ?? '—'}
-                                </td>
-                                <td className="px-3 py-2">
-                                  <span className={`px-1.5 py-0.5 rounded-full font-semibold ${
-                                    item.source === 'naranja'
-                                      ? 'bg-orange-100 text-orange-700'
-                                      : 'bg-teal-100 text-teal-700'
-                                  }`}>
-                                    {item.source === 'naranja' ? 'Naranja' : 'C&R'}
-                                  </span>
-                                </td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             )}
@@ -986,7 +1081,7 @@ export default function SettingsPage() {
               Seleccioná qué modelo de IA se usa para analizar las conversaciones. El cambio aplica inmediatamente para todos los análisis nuevos.
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {/* Card Anthropic */}
               <button
                 onClick={() => saveProvider('anthropic')}
@@ -1054,6 +1149,40 @@ export default function SettingsPage() {
                   <div className="mt-3 text-xs font-semibold text-primary">Activo actualmente</div>
                 )}
               </button>
+
+              {/* Card Groq */}
+              <button
+                onClick={() => saveProvider('groq')}
+                disabled={savingProvider}
+                className={`relative text-left p-5 rounded-lg border-2 transition-all ${
+                  aiProvider === 'groq'
+                    ? 'border-primary bg-red-50'
+                    : 'border-border bg-surface hover:border-gray-300'
+                }`}
+              >
+                {aiProvider === 'groq' && (
+                  <span className="absolute top-3 right-3 text-primary">
+                    <CheckCircle size={18} />
+                  </span>
+                )}
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-10 h-10 rounded-lg bg-[#F55036] flex items-center justify-center text-white font-bold text-lg">
+                    Q
+                  </div>
+                  <div>
+                    <p className="font-semibold text-body">Groq (Llama 3.3)</p>
+                    <p className="text-xs text-gray-500 font-mono">llama-3.3-70b-versatile</p>
+                  </div>
+                </div>
+                <ul className="text-xs text-gray-600 space-y-1">
+                  <li>✓ Capa gratuita muy generosa</li>
+                  <li>✓ Respuestas ultra rápidas</li>
+                  <li>✓ Ideal para alto volumen</li>
+                </ul>
+                {aiProvider === 'groq' && (
+                  <div className="mt-3 text-xs font-semibold text-primary">Activo actualmente</div>
+                )}
+              </button>
             </div>
 
             {providerSaved && (
@@ -1061,9 +1190,29 @@ export default function SettingsPage() {
                 <CheckCircle size={14} /> Proveedor guardado correctamente
               </div>
             )}
+            {providerError && (
+              <div className="mt-4 flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-3">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span className="break-words">{providerError}</span>
+              </div>
+            )}
             {savingProvider && (
               <p className="mt-4 text-sm text-gray-400">Guardando...</p>
             )}
+          </div>
+
+          {/* Análisis autónomo: pausado por el momento */}
+          <div className="bg-amber-50 rounded-lg border border-amber-200 p-5">
+            <div className="flex items-start gap-2">
+              <AlertCircle size={16} className="text-amber-600 mt-0.5 shrink-0" />
+              <div>
+                <h3 className="font-semibold text-amber-900">Análisis automático — Pausado</h3>
+                <p className="text-xs text-amber-800 mt-1">
+                  La función de análisis autónomo en segundo plano está deshabilitada por el momento.
+                  Los análisis manuales individuales y los análisis por lote siguen funcionando normalmente.
+                </p>
+              </div>
+            </div>
           </div>
 
           <div className="p-4 bg-blue-50 rounded-md border border-blue-200 text-xs text-blue-700">
@@ -1071,7 +1220,8 @@ export default function SettingsPage() {
             <ul className="list-disc list-inside space-y-1 font-mono">
               <li>ANTHROPIC_API_KEY — requerida si usás Claude</li>
               <li>GEMINI_API_KEY — requerida si usás Gemini</li>
-              <li>AI_PROVIDER — opcional, fallback si app_config está vacío (anthropic o gemini)</li>
+              <li>GROQ_API_KEY — requerida si usás Groq</li>
+              <li>AI_PROVIDER — opcional, fallback si app_config está vacío (anthropic, gemini o groq)</li>
             </ul>
           </div>
         </div>
@@ -1111,6 +1261,7 @@ export default function SettingsPage() {
                 <li>SUPABASE_SERVICE_ROLE_KEY</li>
                 <li>ANTHROPIC_API_KEY</li>
                 <li>GEMINI_API_KEY</li>
+                <li>GROQ_API_KEY</li>
                 <li>NEXT_PUBLIC_APP_URL (URL pública del deploy)</li>
                 <li>EVOLUTION_API_BASE_URL (opcional, URL base)</li>
               </ul>
@@ -1131,14 +1282,58 @@ export default function SettingsPage() {
               <h3 className="font-semibold text-body flex items-center gap-2">
                 <ScrollText size={16} className="text-primary" /> Logs de análisis IA
               </h3>
-              <button
-                onClick={() => loadSettingsLogs(logsVendorFilter || undefined)}
-                disabled={loadingSettingsLogs}
-                className="flex items-center gap-1 text-xs text-primary hover:text-primary-dark disabled:opacity-50"
-              >
-                <RefreshCw size={12} className={loadingSettingsLogs ? 'animate-spin' : ''} />
-                Actualizar
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => loadSettingsLogs(logsVendorFilter || undefined)}
+                  disabled={loadingSettingsLogs}
+                  className="flex items-center gap-1 text-xs text-primary hover:text-primary-dark disabled:opacity-50"
+                >
+                  <RefreshCw size={12} className={loadingSettingsLogs ? 'animate-spin' : ''} />
+                  Actualizar
+                </button>
+                {logsVendorFilter && confirmDeleteLogs !== 'all' && (
+                  confirmDeleteLogs === 'vendor' ? (
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-red-600 font-medium">¿Borrar logs de este vendedor?</span>
+                      <button
+                        onClick={() => deleteLogs('vendor')}
+                        disabled={deletingLogs}
+                        className="text-xs bg-red-600 hover:bg-red-700 text-white font-semibold px-2 py-0.5 rounded disabled:opacity-50"
+                      >
+                        {deletingLogs ? <Loader2 size={10} className="animate-spin" /> : 'Sí'}
+                      </button>
+                      <button onClick={() => setConfirmDeleteLogs(null)} className="text-xs text-gray-400 hover:text-body px-1">No</button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmDeleteLogs('vendor')}
+                      className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 border border-red-200 hover:border-red-400 px-2 py-0.5 rounded transition-colors"
+                    >
+                      <Trash2 size={11} /> Borrar vendedor
+                    </button>
+                  )
+                )}
+                {confirmDeleteLogs === 'all' ? (
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-red-600 font-medium">¿Borrar todos los logs?</span>
+                    <button
+                      onClick={() => deleteLogs('all')}
+                      disabled={deletingLogs}
+                      className="text-xs bg-red-600 hover:bg-red-700 text-white font-semibold px-2 py-0.5 rounded disabled:opacity-50"
+                    >
+                      {deletingLogs ? <Loader2 size={10} className="animate-spin" /> : 'Sí'}
+                    </button>
+                    <button onClick={() => setConfirmDeleteLogs(null)} className="text-xs text-gray-400 hover:text-body px-1">No</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteLogs('all')}
+                    className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 border border-red-200 hover:border-red-400 px-2 py-0.5 rounded transition-colors"
+                  >
+                    <Trash2 size={11} /> Borrar todos
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center gap-3 mb-4">
@@ -1240,6 +1435,310 @@ export default function SettingsPage() {
               <li><strong>Manual:</strong> disparado por el botón &quot;Analizar con IA&quot; en la conversación</li>
               <li>Se registran tanto los análisis exitosos como los que fallan, con su causa</li>
               <li>Requiere que la migración <code>analysis_logs.sql</code> esté ejecutada en Supabase</li>
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* ── Tab: Mantenimiento ─────────────────────────────────────────────── */}
+      {activeTab === 'maintenance' && (
+        <div className="space-y-6">
+
+          {/* Archivar todo */}
+          <div className="bg-surface rounded-lg border border-border p-5 space-y-4">
+            <div>
+              <h3 className="font-semibold text-body flex items-center gap-2">
+                <Archive size={16} className="text-amber-500" /> Archivar todas las conversaciones
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Mueve <strong>todas</strong> las conversaciones activas al Histórico de una vez.
+              </p>
+            </div>
+
+            {archAllError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{archAllError}</p>
+            )}
+
+            {archAllResult && (
+              <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+                <CheckCircle size={15} />
+                Se archivaron <strong>{archAllResult.archived}</strong> conversación{archAllResult.archived !== 1 ? 'es' : ''} correctamente.
+              </div>
+            )}
+
+            {!archAllConfirm && !archAllResult && (
+              <button
+                onClick={() => setArchAllConfirm(true)}
+                className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-4 py-2 rounded-md transition-colors"
+              >
+                <Archive size={14} /> Archivar todo
+              </button>
+            )}
+
+            {archAllConfirm && (
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-4 space-y-3">
+                <p className="text-sm font-semibold text-amber-800">
+                  ¿Confirmás archivar todas las conversaciones activas?
+                </p>
+                <p className="text-xs text-amber-700">
+                  Se moverán al Histórico. Podés restaurarlas desde la página de Histórico.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={executeArchiveAll}
+                    disabled={archAllWorking}
+                    className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-4 py-2 rounded-md disabled:opacity-50 transition-colors"
+                  >
+                    {archAllWorking ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                    {archAllWorking ? 'Archivando...' : 'Sí, archivar todo'}
+                  </button>
+                  <button
+                    onClick={() => setArchAllConfirm(false)}
+                    className="text-sm text-gray-500 hover:text-body border border-border px-3 py-2 rounded-md transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Archivo masivo a Histórico */}
+          <div className="bg-surface rounded-lg border border-border p-5 space-y-5">
+            <div>
+              <h3 className="font-semibold text-body flex items-center gap-2">
+                <Archive size={16} className="text-primary" /> Archivar conversaciones en lote
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Mueve conversaciones activas al Histórico según las condiciones que elijas. Usá Vista previa antes de archivar.
+              </p>
+            </div>
+
+            {/* Condiciones */}
+            <div className="space-y-4">
+              <p className="text-xs font-semibold text-muted flex items-center gap-1.5">
+                <Filter size={11} /> Condiciones (se combinan con AND)
+              </p>
+
+              {/* No respondida por el cliente */}
+              <label className="flex items-start gap-3 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={archUnrespondedClient}
+                  onChange={e => setArchUnrespondedClient(e.target.checked)}
+                  className="mt-0.5 accent-primary"
+                />
+                <div>
+                  <span className="text-sm font-medium text-body group-hover:text-primary transition-colors">
+                    Sin respuesta del cliente
+                  </span>
+                  <p className="text-xs text-gray-400">El último mensaje fue enviado por el vendedor (cliente no respondió)</p>
+                </div>
+              </label>
+
+              {/* Menos de N mensajes */}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={archMaxMessages !== ''}
+                    onChange={e => setArchMaxMessages(e.target.checked ? '5' : '')}
+                    className="accent-primary"
+                  />
+                  <span className="text-sm font-medium text-body">Con menos de</span>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  value={archMaxMessages}
+                  onChange={e => setArchMaxMessages(e.target.value)}
+                  disabled={archMaxMessages === ''}
+                  placeholder="5"
+                  className="w-16 border border-border rounded-md px-2 py-1 text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-40"
+                />
+                <span className="text-sm text-body">mensajes</span>
+              </div>
+
+              {/* Sin actividad hace N días */}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={archMinInactiveDays !== ''}
+                    onChange={e => setArchMinInactiveDays(e.target.checked ? '30' : '')}
+                    className="accent-primary"
+                  />
+                  <span className="text-sm font-medium text-body">Sin actividad hace más de</span>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  value={archMinInactiveDays}
+                  onChange={e => setArchMinInactiveDays(e.target.value)}
+                  disabled={archMinInactiveDays === ''}
+                  placeholder="30"
+                  className="w-16 border border-border rounded-md px-2 py-1 text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-40"
+                />
+                <span className="text-sm text-body">días</span>
+              </div>
+
+              {/* Rango de fechas (last_message_at) */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-body">Rango de fecha de último mensaje</p>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted w-8">Desde</span>
+                    <input
+                      type="date"
+                      value={archDateFrom}
+                      onChange={e => setArchDateFrom(e.target.value)}
+                      className="border border-border rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted w-8">Hasta</span>
+                    <input
+                      type="date"
+                      value={archDateTo}
+                      onChange={e => setArchDateTo(e.target.value)}
+                      className="border border-border rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                  {(archDateFrom || archDateTo) && (
+                    <button
+                      onClick={() => { setArchDateFrom(''); setArchDateTo('') }}
+                      className="text-xs text-gray-400 hover:text-body"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Error */}
+            {archError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+                {archError}
+              </p>
+            )}
+
+            {/* Resultado de ejecución */}
+            {archResult && (
+              <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+                <CheckCircle size={15} />
+                Se archivaron <strong>{archResult.archived}</strong> conversación{archResult.archived !== 1 ? 'es' : ''} correctamente.
+              </div>
+            )}
+
+            {/* Botón Vista previa */}
+            {!archConfirm && (
+              <button
+                onClick={previewArchive}
+                disabled={archWorking}
+                className="flex items-center gap-2 bg-primary hover:bg-primary-dark text-white text-sm font-semibold px-4 py-2 rounded-md transition-colors disabled:opacity-50"
+              >
+                {archWorking ? <Loader2 size={14} className="animate-spin" /> : <Filter size={14} />}
+                {archWorking ? 'Calculando...' : 'Vista previa'}
+              </button>
+            )}
+
+            {/* Preview de resultados */}
+            {archCount !== null && archPreview !== null && !archConfirm && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-body">
+                    {archCount === 0
+                      ? 'Ninguna conversación cumple las condiciones'
+                      : <>Se archivarían <span className="text-primary">{archCount}</span> conversación{archCount !== 1 ? 'es' : ''}</>
+                    }
+                  </p>
+                  {archCount > 0 && (
+                    <button
+                      onClick={() => setArchConfirm(true)}
+                      className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-md transition-colors"
+                    >
+                      <Archive size={13} /> Archivar ahora
+                    </button>
+                  )}
+                </div>
+
+                {archPreview.length > 0 && (
+                  <div className="border border-border rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-bg border-b border-border sticky top-0">
+                        <tr>
+                          <th className="text-left px-3 py-2 text-muted font-medium">Nombre / Teléfono</th>
+                          <th className="text-left px-3 py-2 text-muted font-medium">Mensajes</th>
+                          <th className="text-left px-3 py-2 text-muted font-medium">Último mensaje</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {archPreview.map(row => (
+                          <tr key={row.id} className="hover:bg-bg">
+                            <td className="px-3 py-2">
+                              <p className="font-medium text-body truncate max-w-[200px]">{row.name}</p>
+                              <p className="text-gray-400">{row.client_phone}</p>
+                            </td>
+                            <td className="px-3 py-2 text-gray-500">{row.message_count}</td>
+                            <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                              {row.last_message_at
+                                ? new Date(row.last_message_at).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'UTC' })
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                        {archCount > 50 && (
+                          <tr>
+                            <td colSpan={3} className="px-3 py-2 text-center text-gray-400">
+                              … y {archCount - 50} más
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Confirmación final */}
+            {archConfirm && (
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-4 space-y-3">
+                <p className="text-sm font-semibold text-amber-800">
+                  ¿Confirmás archivar {archCount} conversación{archCount !== 1 ? 'es' : ''}?
+                </p>
+                <p className="text-xs text-amber-700">
+                  Se moverán al Histórico. Podés restaurarlas desde la página de Histórico.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={executeArchive}
+                    disabled={archWorking}
+                    className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-4 py-2 rounded-md disabled:opacity-50 transition-colors"
+                  >
+                    {archWorking ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                    {archWorking ? 'Archivando...' : 'Sí, archivar'}
+                  </button>
+                  <button
+                    onClick={() => setArchConfirm(false)}
+                    className="text-sm text-gray-500 hover:text-body border border-border px-3 py-2 rounded-md transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Info */}
+          <div className="p-4 bg-blue-50 rounded-md border border-blue-200 text-xs text-blue-700">
+            <p className="font-semibold mb-1">Sobre el archivo en lote</p>
+            <ul className="list-disc list-inside space-y-1">
+              <li>Solo afecta conversaciones en estado <strong>Activa</strong></li>
+              <li>Las conversaciones archivadas se pueden restaurar desde <strong>Histórico</strong></li>
+              <li>Las condiciones se combinan: se archivan conversaciones que cumplen <strong>todas</strong> las seleccionadas</li>
+              <li>Usá <strong>Vista previa</strong> siempre antes de ejecutar</li>
             </ul>
           </div>
         </div>

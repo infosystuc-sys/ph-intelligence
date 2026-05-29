@@ -32,7 +32,7 @@ export default function ConversationsPage() {
   const [groupsExpanded, setGroupsExpanded] = useState(false)
   const [addingPhone, setAddingPhone] = useState(false)
   const [addPhoneMsg, setAddPhoneMsg] = useState<{ type: 'ok' | 'error' | 'exists'; text: string } | null>(null)
-  const [baseMap, setBaseMap] = useState<Record<string, { cod_cliente: string | null; source: string }>>({})
+  const [baseMap, setBaseMap] = useState<Record<string, { cliente: string | null; cuit_dni: string | null; localidad: string | null; tarjetas: string[]; observacion: string | null }>>({})
 
   // Edición de nombre en el header
   const [editingName, setEditingName] = useState(false)
@@ -47,6 +47,10 @@ export default function ConversationsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkWorking, setBulkWorking] = useState(false)
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+
+  // Eliminar conversación individual
+  const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false)
+  const [deletingSelected, setDeletingSelected] = useState(false)
 
   // Log de análisis IA por conversación
   type AnalysisLog = {
@@ -68,8 +72,9 @@ export default function ConversationsPage() {
 
   const loadConversations = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
-    // Carga todas las conversaciones activas de una vez — filtros aplicados client-side
-    const res = await fetch('/api/conversations?limit=2000')
+    // Carga TODAS las conversaciones (no historico) paginando internamente.
+    // El cap de 1000 de PostgREST hacía que con tablas grandes vinieran truncadas.
+    const res = await fetch('/api/conversations?all=true')
     const data = await res.json()
     setConversations(data.data ?? [])
     if (!silent) setLoading(false)
@@ -88,6 +93,15 @@ export default function ConversationsPage() {
     })
   }, [supabase])
 
+  // Autoselección por ?id= en la URL (navegación desde /analyses → "Ir a conversación")
+  useEffect(() => {
+    const targetId = searchParams.get('id')
+    if (!targetId || !conversations.length || selected?.id === targetId) return
+    const match = conversations.find(c => c.id === targetId)
+    if (match) selectConversation(match)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversations, searchParams])
+
   // Cargar datos auxiliares una sola vez al montar
   useEffect(() => {
     fetch('/api/employee-phones')
@@ -97,7 +111,7 @@ export default function ConversationsPage() {
         setEmployeePhones(new Set(phones))
       })
 
-    fetch('/api/base-tn/lookup')
+    fetch('/api/base-clientes/lookup')
       .then(r => r.json())
       .then(d => {
         if (d.data) setBaseMap(d.data)
@@ -202,30 +216,40 @@ export default function ConversationsPage() {
     return () => { supabase.removeChannel(channel) }
   }, [supabase])
 
-  // Dispara un análisis automático de 1 conversación pendiente sin bloquear la UI.
-  // Fire-and-forget: no muestra loading ni notificaciones al usuario.
-  const triggerAutoAnalysis = useCallback(() => {
-    fetch('/api/analyze/auto', { method: 'POST' })
-      .then(r => r.json())
-      .then(d => { if (d.analyzed) console.log('[AutoAnalysis]', d.conversationId) })
-      .catch(() => {}) // silencioso ante cualquier error
-  }, [])
+  // Realtime: cuando una conversación cambia de status (p.ej. el auto-análisis la
+  // mueve a historico), reflejar el cambio inmediatamente sin esperar el refresco de 5 min.
+  useEffect(() => {
+    const channel = supabase
+      .channel('conversations-status-realtime')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' },
+        (payload) => {
+          const updated = payload.new as { id: string; status: string }
+          if (updated.status === 'historico') {
+            // Sacar de la lista activa
+            setConversations(prev => prev.filter(c => c.id !== updated.id))
+            setSelected(prev => {
+              if (prev?.id === updated.id) { setMessages([]); return null }
+              return prev
+            })
+          }
+        }
+      )
+      .subscribe()
 
-  // Refresco silencioso cada 5 minutos + disparo de auto-análisis
+    return () => { supabase.removeChannel(channel) }
+  }, [supabase])
+
+  // Análisis automático deshabilitado por el momento.
+  // El toggle en Settings no persistía correctamente, así que se pausa la función
+  // hasta resolver la causa raíz. Solo el análisis manual y por lote siguen activos.
+
+  // Refresco silencioso de la lista cada 5 minutos (sin disparar análisis IA)
   useEffect(() => {
     const interval = setInterval(() => {
       loadConversations(true)
-      triggerAutoAnalysis()
     }, 5 * 60 * 1000)
     return () => clearInterval(interval)
-  }, [loadConversations, triggerAutoAnalysis])
-
-  // Primer análisis automático: 20 segundos después del montaje
-  // (deja que la carga inicial termine antes de hacer la llamada al LLM)
-  useEffect(() => {
-    const timer = setTimeout(triggerAutoAnalysis, 20_000)
-    return () => clearTimeout(timer)
-  }, [triggerAutoAnalysis])
+  }, [loadConversations])
 
   const selectConversation = async (conv: Conversation) => {
     setSelected(conv)
@@ -233,6 +257,7 @@ export default function ConversationsPage() {
     setEditingName(false)
     setShowLogPanel(false)
     setAiLogs([])
+    setConfirmDeleteSelected(false)
     setLoadingMessages(true)
     try {
       const res = await fetch(`/api/messages?conversationId=${conv.id}`)
@@ -279,29 +304,50 @@ export default function ConversationsPage() {
   const handleBulkMoveHistorico = async () => {
     if (!selectedIds.size) return
     setBulkWorking(true)
-    await fetch('/api/conversations', {
+    const res = await fetch('/api/conversations', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [...selectedIds], status: 'historico' }),
     })
-    setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
-    if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
-    exitSelectionMode()
+    if (res.ok) {
+      setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
+      if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
+      exitSelectionMode()
+    }
     setBulkWorking(false)
   }
 
   const handleBulkDelete = async () => {
     if (!selectedIds.size) return
     setBulkWorking(true)
-    await fetch('/api/conversations', {
+    const res = await fetch('/api/conversations', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [...selectedIds] }),
     })
-    setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
-    if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
-    exitSelectionMode()
+    if (res.ok) {
+      setConversations(prev => prev.filter(c => !selectedIds.has(c.id)))
+      if (selected && selectedIds.has(selected.id)) { setSelected(null); setMessages([]) }
+      exitSelectionMode()
+    }
     setBulkWorking(false)
+  }
+
+  const handleDeleteSelected = async () => {
+    if (!selected) return
+    setDeletingSelected(true)
+    const res = await fetch('/api/conversations', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [selected.id] }),
+    })
+    setDeletingSelected(false)
+    if (res.ok) {
+      setConversations(prev => prev.filter(c => c.id !== selected.id))
+      setSelected(null)
+      setMessages([])
+      setConfirmDeleteSelected(false)
+    }
   }
 
   const handleAnalyze = async () => {
@@ -357,26 +403,37 @@ export default function ConversationsPage() {
   const matchesSearch = (c: Conversation) => {
     if (!search) return true
     const q = search.toLowerCase()
-    // Cuando hay debouncedSearch el API ya filtró por nombre/teléfono/cod_cliente.
-    // Acá solo aplicamos campos adicionales que el API no cubre.
+    // Cuando hay debouncedSearch el API ya filtró por nombre/teléfono/cliente.
     const localFields = [
       c.display_name,
       c.client_name,
       c.client_phone,
       formatPhone(c.client_phone),
-      c.cod_cliente,
+      c.base_localidad,
+      ...(c.base_tarjetas ?? []),
       c.vendedor?.full_name,
       c.last_message?.content,
-      c.base_source === 'cancela_renueva' ? 'cancela renueva' : c.base_source,
       c.status,
     ]
     return localFields.some(f => f?.toLowerCase().includes(q))
   }
 
   const getBaseMatch = (conv: Conversation) => {
-    if (conv.base_source) return { cod_cliente: conv.cod_cliente ?? null, source: conv.base_source }
+    // 1) Si la conversación ya tiene los datos persistidos en DB, usar esos.
+    if (conv.base_cliente || conv.base_localidad || (conv.base_tarjetas && conv.base_tarjetas.length > 0)) {
+      return {
+        cliente:     conv.base_cliente     ?? null,
+        cuit_dni:    conv.base_cuit_dni    ?? null,
+        localidad:   conv.base_localidad   ?? null,
+        tarjetas:    conv.base_tarjetas    ?? [],
+        observacion: conv.base_observacion ?? null,
+      }
+    }
+    // 2) Fallback al lookup en memoria (base recién importada, sin match-retroactive todavía).
+    // Match por los últimos 9 dígitos.
     const norm = normalizePhone(conv.client_phone)
-    return baseMap[norm] ?? null
+    if (norm.length < 9) return null
+    return baseMap[norm.slice(-9)] ?? null
   }
 
   const individualConvs = conversations.filter(c =>
@@ -444,14 +501,15 @@ export default function ConversationsPage() {
       })()
     : null
 
+  // Prioridad de nombre: base.cliente (CSV) > display_name (editable) > client_name (WhatsApp) > phone
   const selectedDisplayName = selected
-    ? (selected.display_name ?? selected.client_name ?? selected.client_phone)
+    ? (selected.base_cliente ?? selected.display_name ?? selected.client_name ?? selected.client_phone)
     : ''
 
   return (
     <div className="flex h-full">
       {/* Panel izquierdo: lista de conversaciones */}
-      <div className="w-80 border-r border-border bg-surface flex flex-col shrink-0">
+      <div className="w-[576px] border-r border-border bg-surface flex flex-col shrink-0">
 
         {/* Toolbar de selección múltiple */}
         {selectionMode && (
@@ -641,6 +699,7 @@ export default function ConversationsPage() {
           handleSaveName={handleSaveName}
           selectConversation={selectConversation}
           toggleSelection={toggleSelection}
+          userRole={userRole}
         />
       </div>
 
@@ -704,12 +763,38 @@ export default function ConversationsPage() {
                   {formatPhone(selected.client_phone)}
                   {getBaseMatch(selected) && (() => {
                     const m = getBaseMatch(selected)!
+                    const primary = m.tarjetas[0] ?? null
+                    const extra   = Math.max(0, m.tarjetas.length - 1)
+                    const hasMatch = !!(m.cliente || m.localidad || primary)
+                    if (!hasMatch) return null
+                    const tooltip = [
+                      m.cliente     && `Cliente: ${m.cliente}`,
+                      m.cuit_dni    && `CUIT/DNI: ${m.cuit_dni}`,
+                      m.localidad   && `Localidad: ${m.localidad}`,
+                      m.tarjetas.length && `Tarjetas: ${m.tarjetas.join(', ')}`,
+                      m.observacion && `Obs: ${m.observacion}`,
+                    ].filter(Boolean).join('\n')
                     return (
-                      <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                        m.source === 'cancela_renueva' ? 'bg-teal-100 text-teal-700' : 'bg-orange-100 text-orange-700'
-                      }`}>
-                        {m.source === 'cancela_renueva' ? 'C&R' : m.cod_cliente ? `#${m.cod_cliente}` : 'Naranja'}
-                      </span>
+                      <>
+                        <span
+                          className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200"
+                          title={tooltip}
+                        >
+                          {m.localidad ?? 'Cliente'}
+                          {primary && <span className="font-normal opacity-80"> · {primary}</span>}
+                          {extra > 0 && <span className="font-normal opacity-80"> +{extra}</span>}
+                        </span>
+                        {m.cuit_dni && (
+                          <span className="inline-flex text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded-full" title={tooltip}>
+                            DNI {m.cuit_dni}
+                          </span>
+                        )}
+                        {m.observacion && (
+                          <span className="text-[10px] italic text-gray-600" title={m.observacion}>
+                            &ldquo;{m.observacion}&rdquo;
+                          </span>
+                        )}
+                      </>
                     )
                   })()}
                   <span>{' · '}{selected.vendedor?.full_name ?? '—'} · {selected.message_count} mensajes</span>
@@ -736,19 +821,21 @@ export default function ConversationsPage() {
                     </button>
                   </div>
                 ) : null}
-                <div className="flex flex-col items-start gap-1">
-                  <button
-                    onClick={handleAnalyze}
-                    disabled={analyzing}
-                    className="flex items-center gap-1.5 bg-primary hover:bg-primary-dark text-white text-xs font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
-                  >
-                    <Brain size={14} />
-                    {analyzing ? 'Analizando...' : latestAnalysis ? 'Re-analizar con IA' : '🤖 Analizar con IA'}
-                  </button>
-                  {analyzeError && (
-                    <span className="text-xs text-red-500 font-medium">{analyzeError}</span>
-                  )}
-                </div>
+                {!employeePhones.has(selected.client_phone) && !selected.remote_jid?.endsWith('@g.us') && (
+                  <div className="flex flex-col items-start gap-1">
+                    <button
+                      onClick={handleAnalyze}
+                      disabled={analyzing}
+                      className="flex items-center gap-1.5 bg-primary hover:bg-primary-dark text-white text-xs font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
+                    >
+                      <Brain size={14} />
+                      {analyzing ? 'Analizando...' : latestAnalysis ? 'Re-analizar con IA' : '🤖 Analizar con IA'}
+                    </button>
+                    {analyzeError && (
+                      <span className="text-xs text-red-500 font-medium">{analyzeError}</span>
+                    )}
+                  </div>
+                )}
                 {/* Agregar a empleados */}
                 <div className="flex items-center gap-1.5">
                   {addPhoneMsg && (
@@ -781,6 +868,34 @@ export default function ConversationsPage() {
                     Empleado
                   </button>
                 </div>
+
+                {/* Eliminar conversación */}
+                {!confirmDeleteSelected ? (
+                  <button
+                    onClick={() => setConfirmDeleteSelected(true)}
+                    title="Eliminar conversación"
+                    className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border text-gray-500 hover:border-red-400 hover:text-red-500 font-medium transition-colors"
+                  >
+                    <Trash2 size={11} /> Eliminar
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-red-600 font-medium">¿Eliminar?</span>
+                    <button
+                      onClick={handleDeleteSelected}
+                      disabled={deletingSelected}
+                      className="text-xs bg-red-600 hover:bg-red-700 text-white font-semibold px-2 py-1 rounded disabled:opacity-50 transition-colors"
+                    >
+                      {deletingSelected ? <Loader2 size={10} className="animate-spin" /> : 'Sí'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteSelected(false)}
+                      className="text-xs text-gray-400 hover:text-body px-1"
+                    >
+                      No
+                    </button>
+                  </div>
+                )}
 
                 <button onClick={() => selectConversation(selected)} className="text-muted hover:text-body">
                   <RefreshCw size={14} />

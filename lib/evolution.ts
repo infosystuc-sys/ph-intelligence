@@ -212,9 +212,21 @@ export async function syncInstanceConversations(
   const chats = allChats.filter(chat => {
     const jid = chat.remoteJid || chat.id
     if (!jid || jid.endsWith('@g.us')) return false
+
+    // Obtener timestamp: messageTimestamp (segundos) o updatedAt (ISO string) como fallback
     const ts = chat.lastMessage?.messageTimestamp
-    if (!ts) return true // sin timestamp → incluir por las dudas
-    return ts * 1000 >= cutoff
+    const updatedAtMs = chat.updatedAt ? new Date(chat.updatedAt).getTime() : null
+
+    if (!ts && !updatedAtMs) return true // sin ningún timestamp → incluir
+
+    let tsMs: number
+    if (ts) {
+      tsMs = ts > 1e12 ? ts : ts * 1000 // manejar segundos o ms
+    } else {
+      tsMs = updatedAtMs!
+    }
+
+    return isNaN(tsMs) || tsMs >= cutoff
   })
 
   skipped = allChats.length - chats.length

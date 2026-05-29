@@ -25,57 +25,99 @@ export async function GET(req: NextRequest) {
     const page = parseInt(searchParams.get('page') ?? '1')
     const limit = parseInt(searchParams.get('limit') ?? '50')
     const offset = (page - 1) * limit
+    // ?all=true → paginar internamente hasta agotar (PostgREST cap-ea .select() a 1000
+    // por default; con limit alto en cliente igual venían truncadas)
+    const fetchAll = searchParams.get('all') === 'true'
 
     const service = createServiceSupabaseClient()
 
-    let query = service
-      .from('conversations')
-      .select(`
-        *,
-        vendedor:users!vendedor_id(id, full_name, avatar_url, role),
-        ai_analysis:ai_analyses(id, quality_score, conversation_stage, sentiment, analyzed_at)
-      `, { count: 'exact' })
-      .order('last_message_at', { ascending: false })
-      .range(offset, offset + limit - 1)
+    // Construye la query base reutilizable (sin range, sin count). Aplica todos los
+    // filtros menos `stage` que se aplica post-fetch sobre ai_analysis.
+    const buildQuery = (withCount: boolean) => {
+      let q = service
+        .from('conversations')
+        .select(`
+          *,
+          vendedor:users!vendedor_id(id, full_name, avatar_url, role),
+          ai_analysis:ai_analyses(id, quality_score, conversation_stage, sentiment, analyzed_at)
+        `, withCount ? { count: 'exact' } : undefined)
+        .order('last_message_at', { ascending: false })
 
-    if (vendorId) {
-      query = query.eq('vendedor_id', vendorId)
-    } else if (profile?.role === 'supervisor') {
-      // Supervisor: solo ve las conversaciones de sus vendedores
+      if (vendorId) {
+        q = q.eq('vendedor_id', vendorId)
+      } else if (profile?.role === 'supervisor') {
+        // El filtro de vendedor se aplica luego en `applyRoleFilter` con un await
+        // — esta función queda síncrona.
+      } else if (profile?.role === 'vendedor') {
+        q = q.eq('vendedor_id', user.id)
+      }
+
+      // Excluir histórico del listado principal; histórico tiene su propia página
+      if (status) q = q.eq('status', status)
+      else        q = q.neq('status', 'historico')
+      if (instanceId) q = q.eq('instance_id', instanceId)
+
+      if (search) {
+        q = q.or(
+          `display_name.ilike.%${search}%,client_name.ilike.%${search}%,client_phone.ilike.%${search}%,base_localidad.ilike.%${search}%`
+        )
+      }
+      return q
+    }
+
+    // Resolver vendedores del supervisor una sola vez (si aplica).
+    let supervisorVendorIds: string[] | null = null
+    if (!vendorId && profile?.role === 'supervisor') {
       const { data: myVendors } = await service.from('users').select('id').eq('supervisor_id', user.id)
-      const vendorIds = myVendors?.map(v => v.id) ?? []
-      query = query.in('vendedor_id', vendorIds)
-    } else if (profile?.role === 'vendedor') {
-      query = query.eq('vendedor_id', user.id)
+      supervisorVendorIds = myVendors?.map(v => v.id) ?? []
     }
 
-    // Excluir histórico del listado principal; histórico tiene su propia página
-    if (status) query = query.eq('status', status)
-    else        query = query.neq('status', 'historico')
-    if (instanceId) query = query.eq('instance_id', instanceId)
-
-    // Búsqueda server-side: nombre, teléfono, cod_cliente
-    if (search) {
-      query = query.or(
-        `display_name.ilike.%${search}%,client_name.ilike.%${search}%,client_phone.ilike.%${search}%,cod_cliente.ilike.%${search}%`
-      )
+    const applyRoleFilter = <T extends ReturnType<typeof buildQuery>>(q: T): T => {
+      if (supervisorVendorIds) return q.in('vendedor_id', supervisorVendorIds) as T
+      return q
     }
 
-    const { data, error, count } = await query
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    type ConvRecord = Record<string, unknown> & {
+      ai_analysis?: Array<{ conversation_stage: string; analyzed_at: string }>
     }
 
-    let filtered = data ?? []
+    let rows: ConvRecord[]
+    let totalCount: number | null = null
+
+    if (fetchAll) {
+      const PAGE = 1000
+      const acc: ConvRecord[] = []
+      let from = 0
+      while (true) {
+        const { data, error } = await applyRoleFilter(buildQuery(false)).range(from, from + PAGE - 1)
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+        if (!data || data.length === 0) break
+        acc.push(...(data as ConvRecord[]))
+        if (data.length < PAGE) break
+        from += PAGE
+      }
+      rows = acc
+      totalCount = acc.length
+    } else {
+      const { data, error, count } = await applyRoleFilter(buildQuery(true)).range(offset, offset + limit - 1)
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      rows = (data ?? []) as ConvRecord[]
+      totalCount = count ?? null
+    }
+
+    let filtered = rows
     if (stage) {
       filtered = filtered.filter(c => {
-        const analyses = c.ai_analysis as Array<{ conversation_stage: string }> | null
-        return analyses && analyses.length > 0 && analyses[0].conversation_stage === stage
+        const analyses = c.ai_analysis ?? null
+        if (!analyses || analyses.length === 0) return false
+        const latest = [...analyses].sort((a, b) =>
+          new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime()
+        )[0]
+        return latest.conversation_stage === stage
       })
     }
 
-    return NextResponse.json({ data: filtered, count, page, limit })
+    return NextResponse.json({ data: filtered, count: totalCount, page, limit })
   } catch (error) {
     console.error('Error en conversations:', error)
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })
@@ -102,7 +144,12 @@ export async function PATCH(req: NextRequest) {
         return NextResponse.json({ error: 'Sin permisos' }, { status: 403 })
       }
       const { error } = await service.from('conversations').update({ status }).in('id', ids)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) {
+        const hint = status === 'historico'
+          ? ' — Ejecutá la migración supabase/fix_conversations_status_historico.sql en Supabase'
+          : ''
+        return NextResponse.json({ error: error.message + hint }, { status: 500 })
+      }
       return NextResponse.json({ updated: ids.length })
     }
 

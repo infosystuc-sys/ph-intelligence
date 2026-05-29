@@ -53,6 +53,57 @@ export async function GET(req: NextRequest) {
     const todayKpis = kpis?.filter(k => k.date === today) ?? []
     const prevKpis = kpis?.filter(k => k.date !== today) ?? []
 
+    // ── Conteo LIVE de conversaciones por vendedor — excluyendo grupos y empleados.
+    // No leemos esos números desde daily_kpis porque pueden estar stale (calculados antes
+    // del filtro o sin todos los empleados registrados).
+    const { data: empPhones } = await service.from('employee_phones').select('phone')
+    const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+    let convsQuery = service
+      .from('conversations')
+      .select('vendedor_id, status, remote_jid, client_phone, last_message_at')
+
+    if (profile?.role === 'supervisor') {
+      const { data: myVendors } = await service
+        .from('users').select('id').eq('supervisor_id', user.id)
+      const vendorIds = myVendors?.map(v => v.id) ?? []
+      if (vendorIds.length) convsQuery = convsQuery.in('vendedor_id', vendorIds)
+    } else if (profile?.role === 'vendedor') {
+      convsQuery = convsQuery.eq('vendedor_id', user.id)
+    }
+
+    const { data: allConvs } = await convsQuery
+    const now = new Date()
+    const h24ago = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+
+    type ConvRow = {
+      vendedor_id: string | null
+      status: string
+      remote_jid: string | null
+      client_phone: string
+      last_message_at: string | null
+    }
+    const liveCountByVendor: Record<string, { total: number; unresponded: number }> = {}
+    ;(allConvs as ConvRow[] ?? []).forEach(c => {
+      if (c.remote_jid?.endsWith('@g.us')) return        // excluir grupos
+      if (employeePhoneSet.has(c.client_phone)) return   // excluir empleados
+      const vid = c.vendedor_id
+      if (!vid) return
+      if (!liveCountByVendor[vid]) liveCountByVendor[vid] = { total: 0, unresponded: 0 }
+      liveCountByVendor[vid].total++
+      if (c.status === 'active' && c.last_message_at && new Date(c.last_message_at) < h24ago) {
+        liveCountByVendor[vid].unresponded++
+      }
+    })
+
+    // Sobrescribir los conteos en los KPIs de hoy con los valores live filtrados
+    todayKpis.forEach(k => {
+      const live = liveCountByVendor[k.vendedor_id]
+      k.conversations_total          = live?.total       ?? 0
+      k.conversations_unresponded_24h = live?.unresponded ?? 0
+      k.conversations_responded_24h  = (live?.total ?? 0) - (live?.unresponded ?? 0)
+    })
+
     const avgScore = todayKpis.length
       ? todayKpis.reduce((s, k) => s + k.avg_quality_score, 0) / todayKpis.length
       : 0

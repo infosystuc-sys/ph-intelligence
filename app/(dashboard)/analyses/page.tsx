@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { STAGE_LABELS, STAGE_COLORS, getScoreColor } from '@/lib/utils'
 import ScoreBadge from '@/components/ui/ScoreBadge'
-import { Brain, ExternalLink, Filter, Loader2, RefreshCw, Smile, Meh, Frown, ChevronLeft, ChevronRight, Play, ChevronDown, AlertCircle, CheckCircle } from 'lucide-react'
+import { Brain, ExternalLink, Filter, Loader2, RefreshCw, Smile, Meh, Frown, ChevronLeft, ChevronRight, Play, ChevronDown, AlertCircle, CheckCircle, Trash2, Check, X, CheckSquare, MessageSquare } from 'lucide-react'
 import { ConversationStage, SentimentType } from '@/types'
 
 type AnalysisRow = {
@@ -15,7 +15,7 @@ type AnalysisRow = {
   sentiment: SentimentType
   analyzed_at: string
   model_used: string | null
-  conversation: { id: string; client_name: string | null; client_phone: string; display_name: string | null } | null
+  conversation: { id: string; client_name: string | null; client_phone: string; display_name: string | null; base_cliente: string | null } | null
   vendedor: { id: string; full_name: string } | null
 }
 
@@ -70,6 +70,13 @@ export default function AnalysesPage() {
   const [batchLimit,     setBatchLimit]      = useState(10)
   const [showFailReport, setShowFailReport]  = useState(false)
 
+  // Modo selección para borrado manual
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds,   setSelectedIds]   = useState<Set<string>>(new Set())
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting,      setDeleting]      = useState(false)
+  const [deleteError,   setDeleteError]   = useState<string | null>(null)
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) return
@@ -114,6 +121,44 @@ export default function AnalysesPage() {
     if (data.analyzed > 0) loadAnalyses(1)
   }
 
+  const toggleSelected = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else              next.add(id)
+      return next
+    })
+  }
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false)
+    setSelectedIds(new Set())
+    setConfirmDelete(false)
+    setDeleteError(null)
+  }
+
+  const handleDeleteSelected = async () => {
+    if (!selectedIds.size) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      const res = await fetch('/api/analyses', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...selectedIds] }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setDeleteError(data.error ?? `HTTP ${res.status}`)
+        return
+      }
+      exitSelectionMode()
+      await loadAnalyses(page)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   return (
@@ -155,7 +200,70 @@ export default function AnalysesPage() {
               <button onClick={() => loadAnalyses(page)} className="text-muted hover:text-body p-1.5">
                 <RefreshCw size={15} />
               </button>
+              {!selectionMode ? (
+                <button
+                  onClick={() => setSelectionMode(true)}
+                  disabled={batching || !analyses.length}
+                  className="flex items-center gap-1.5 border border-border text-body hover:bg-bg text-xs font-medium px-2.5 py-2 rounded-md transition-colors disabled:opacity-50"
+                  title="Seleccionar análisis para borrar"
+                >
+                  <CheckSquare size={13} /> Seleccionar
+                </button>
+              ) : (
+                <button
+                  onClick={exitSelectionMode}
+                  disabled={deleting}
+                  className="flex items-center gap-1.5 border border-border text-muted hover:bg-bg text-xs font-medium px-2.5 py-2 rounded-md transition-colors disabled:opacity-50"
+                >
+                  <X size={13} /> Cancelar
+                </button>
+              )}
             </div>
+
+            {/* Barra de acción en modo selección */}
+            {selectionMode && (
+              <div className="w-full flex items-center justify-end gap-2 flex-wrap">
+                <span className="text-xs text-muted">
+                  {selectedIds.size} seleccionado{selectedIds.size === 1 ? '' : 's'}
+                </span>
+                {!confirmDelete ? (
+                  <button
+                    onClick={() => setConfirmDelete(true)}
+                    disabled={!selectedIds.size || deleting}
+                    className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
+                  >
+                    <Trash2 size={13} /> Borrar seleccionados
+                  </button>
+                ) : (
+                  <>
+                    <span className="text-xs text-red-700 font-medium">¿Confirmar borrado?</span>
+                    <button
+                      onClick={handleDeleteSelected}
+                      disabled={deleting}
+                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
+                    >
+                      {deleting
+                        ? <><Loader2 size={13} className="animate-spin" /> Borrando…</>
+                        : <><Check size={13} /> Sí, borrar {selectedIds.size}</>
+                      }
+                    </button>
+                    <button
+                      onClick={() => setConfirmDelete(false)}
+                      disabled={deleting}
+                      className="text-xs text-muted hover:text-body px-2 py-1.5"
+                    >
+                      No
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {deleteError && (
+              <div className="w-full max-w-lg flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2.5">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span className="wrap-break-word text-xs">{deleteError}</span>
+              </div>
+            )}
 
             {/* Reporte de resultado */}
             {batchResult && !batchResult.message && (
@@ -260,6 +368,24 @@ export default function AnalysesPage() {
           <table className="w-full text-sm">
             <thead className="bg-bg border-b border-border">
               <tr>
+                {selectionMode && (
+                  <th className="px-3 py-2.5 w-8">
+                    <button
+                      onClick={() => {
+                        if (selectedIds.size === analyses.length) setSelectedIds(new Set())
+                        else                                       setSelectedIds(new Set(analyses.map(a => a.id)))
+                      }}
+                      className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+                        selectedIds.size === analyses.length && analyses.length > 0
+                          ? 'bg-primary border-primary'
+                          : 'border-gray-300 bg-white hover:border-gray-400'
+                      }`}
+                      title={selectedIds.size === analyses.length ? 'Deseleccionar todos' : 'Seleccionar todos'}
+                    >
+                      {selectedIds.size === analyses.length && analyses.length > 0 && <Check size={10} className="text-white" />}
+                    </button>
+                  </th>
+                )}
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted">Fecha</th>
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted">Cliente</th>
                 {['admin', 'supervisor'].includes(userRole) && (
@@ -274,13 +400,29 @@ export default function AnalysesPage() {
             </thead>
             <tbody className="divide-y divide-border">
               {analyses.map(a => {
-                const clientName = a.conversation?.display_name ?? a.conversation?.client_name ?? a.conversation?.client_phone ?? '—'
+                const clientName = a.conversation?.base_cliente ?? a.conversation?.display_name ?? a.conversation?.client_name ?? a.conversation?.client_phone ?? '—'
+                const checked = selectedIds.has(a.id)
                 return (
                   <tr
                     key={a.id}
-                    onClick={() => router.push(`/analysis/${a.id}`)}
-                    className="hover:bg-bg cursor-pointer transition-colors"
+                    onClick={() => {
+                      if (selectionMode) toggleSelected(a.id)
+                      else               router.push(`/analysis/${a.id}`)
+                    }}
+                    className={`cursor-pointer transition-colors ${checked ? 'bg-primary/5' : 'hover:bg-bg'}`}
                   >
+                    {selectionMode && (
+                      <td className="px-3 py-3 w-8" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => toggleSelected(a.id)}
+                          className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+                            checked ? 'bg-primary border-primary' : 'border-gray-300 bg-white hover:border-gray-400'
+                          }`}
+                        >
+                          {checked && <Check size={10} className="text-white" />}
+                        </button>
+                      </td>
+                    )}
                     <td className="px-4 py-3 text-xs text-muted whitespace-nowrap">
                       {new Date(a.analyzed_at).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
                     </td>
@@ -313,8 +455,25 @@ export default function AnalysesPage() {
                     <td className="px-4 py-3 text-[11px] text-muted font-mono truncate max-w-[120px]">
                       {a.model_used ?? '—'}
                     </td>
-                    <td className="px-4 py-3">
-                      <ExternalLink size={14} className="text-muted hover:text-primary" />
+                    <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                      <div className="flex items-center gap-1.5">
+                        {a.conversation?.id && (
+                          <button
+                            onClick={() => router.push(`/conversations?id=${a.conversation!.id}`)}
+                            className="text-muted hover:text-primary p-1 rounded transition-colors"
+                            title="Ir a la conversación"
+                          >
+                            <MessageSquare size={14} />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => router.push(`/analysis/${a.id}`)}
+                          className="text-muted hover:text-primary p-1 rounded transition-colors"
+                          title="Ver detalle del análisis"
+                        >
+                          <ExternalLink size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

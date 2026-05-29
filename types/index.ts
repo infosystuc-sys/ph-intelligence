@@ -47,8 +47,11 @@ export interface Conversation {
   client_name: string | null
   display_name: string | null
   client_phone: string
-  cod_cliente: string | null
-  base_source: string | null  // 'naranja' | 'cancela_renueva' | null
+  base_cliente:     string | null
+  base_cuit_dni:    string | null
+  base_localidad:   string | null
+  base_tarjetas:    string[] | null
+  base_observacion: string | null
   vendedor?: User
   last_message?: Message
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

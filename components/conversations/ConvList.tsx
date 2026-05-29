@@ -15,10 +15,11 @@ interface ConvListProps {
   selectedIds: Set<string>
   groupsExpanded: boolean
   setGroupsExpanded: (fn: boolean | ((prev: boolean) => boolean)) => void
-  getBaseMatch: (conv: Conversation) => { cod_cliente: string | null; source: string } | null
+  getBaseMatch: (conv: Conversation) => { localidad: string | null; tarjetas: string[] } | null
   handleSaveName: (conversationId: string, displayName: string | null) => Promise<void>
   selectConversation: (conv: Conversation) => void
   toggleSelection: (id: string) => void
+  userRole?: string
 }
 
 export default function ConvList({
@@ -34,13 +35,17 @@ export default function ConvList({
   handleSaveName,
   selectConversation,
   toggleSelection,
+  userRole,
 }: ConvListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
+  // Altura calculada para acomodar el contenido nuevo de cada card:
+  // padding y-3 (24px) + fila 1 con ScoreBadge md a la derecha (~46px)
+  // + fila 2 preview/status (~20px) + fila 3 chips (~22px) + márgenes (~8px) = ~120px
   const rowVirtualizer = useVirtualizer({
     count: individualConvs.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 88,
+    estimateSize: () => 120,
     overscan: 8,
   })
 
@@ -78,11 +83,12 @@ export default function ConvList({
                   onClick={() => selectConversation(conv)}
                   selected={selected?.id === conv.id}
                   onSaveName={handleSaveName}
-                  codCliente={match?.cod_cliente ?? null}
-                  baseSource={match?.source ?? null}
+                  baseLocalidad={match?.localidad ?? null}
+                  baseTarjetas={match?.tarjetas ?? null}
                   checkable={selectionMode}
                   checked={selectedIds.has(conv.id)}
                   onCheck={() => toggleSelection(conv.id)}
+                  userRole={userRole}
                 />
               </div>
             )
@@ -111,6 +117,7 @@ export default function ConvList({
               onClick={() => selectConversation(c)}
               selected={selected?.id === c.id}
               onSaveName={handleSaveName}
+              userRole={userRole}
             />
           ))}
         </div>

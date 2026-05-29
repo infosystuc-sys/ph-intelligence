@@ -2,15 +2,13 @@ import { NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { analyzeConversation } from '@/lib/ai-analyzer'
 
-// Condiciones de análisis automático
-const MIN_MESSAGES        = 5           // mínimo para un análisis significativo
-const MAX_DAYS_INACTIVE   = 7           // ignorar conversaciones sin actividad > 7 días
-const COOLDOWN_AUTO_HOURS = 2           // mínimo entre dos análisis automáticos de la misma conv.
-const COOLDOWN_MIN_MINUTES = 30         // mínimo entre cualquier análisis (manual o auto)
+const MIN_MESSAGES        = 5
+const MAX_DAYS_INACTIVE   = 7
+const COOLDOWN_AUTO_HOURS = 2
+const COOLDOWN_MIN_MINUTES = 30
 
 export async function POST() {
   try {
-    // Verificar sesión activa (cualquier rol puede disparar el auto-análisis)
     const supabase = await createServerSupabaseClient()
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) {
@@ -19,96 +17,139 @@ export async function POST() {
 
     const service = createServiceSupabaseClient()
     const now = new Date()
-
     const twoHoursAgo      = new Date(now.getTime() - COOLDOWN_AUTO_HOURS * 60 * 60 * 1000).toISOString()
     const sevenDaysAgo     = new Date(now.getTime() - MAX_DAYS_INACTIVE * 24 * 60 * 60 * 1000).toISOString()
     const thirtyMinutesAgo = new Date(now.getTime() - COOLDOWN_MIN_MINUTES * 60 * 1000).toISOString()
 
-    // Candidatas: activas, con suficientes mensajes, con actividad reciente,
-    // y que no hayan sido auto-analizadas en las últimas 2 horas.
-    const { data: candidates, error } = await service
+    // Conjunto de teléfonos de empleados: excluidos del análisis
+    const { data: empPhones } = await service.from('employee_phones').select('phone')
+    const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+    // ── PRIORIDAD 1: sin ningún análisis previo, ordenadas por más antigua ────
+    // Estas tienen prioridad absoluta: conversaciones que nunca fueron evaluadas.
+    // Nota: .eq('status', 'active') ya excluye histórico, pending y closed.
+    // El .neq adicional es defensa explícita ante cambios futuros en la lógica de status.
+    const { data: neverAnalyzed } = await service
       .from('conversations')
-      .select(`
-        id,
-        last_message_at,
-        last_auto_analysis_at,
-        ai_analyses ( analyzed_at )
-      `)
+      .select('id, client_phone, remote_jid, last_message_at, last_auto_analysis_at')
       .eq('status', 'active')
+      .neq('status', 'historico')
+      .not('remote_jid', 'ilike', '%@g.us')   // excluir grupos
       .gte('message_count', MIN_MESSAGES)
       .gte('last_message_at', sevenDaysAgo)
       .or(`last_auto_analysis_at.is.null,last_auto_analysis_at.lt.${twoHoursAgo}`)
-      .order('last_message_at', { ascending: false })
-      .limit(20)
+      .order('created_at', { ascending: true })   // más antiguas primero
+      .limit(30)
 
-    if (error) {
-      console.error('[AutoAnalysis] Error consultando candidatas:', error)
-      return NextResponse.json({ analyzed: false, reason: 'Error interno al consultar' }, { status: 500 })
+    type NeverRow = { id: string; client_phone: string; remote_jid: string | null; last_message_at: string | null; last_auto_analysis_at: string | null }
+
+    // Filtrar las que realmente no tienen análisis (ai_analyses vacío)
+    // Hacemos un check en lote para no hacer N queries individuales
+    const neverAnalyzedFiltered = (neverAnalyzed as NeverRow[] ?? []).filter(c =>
+      !employeePhoneSet.has(c.client_phone) && !c.remote_jid?.endsWith('@g.us')
+    )
+    const candidateIds = neverAnalyzedFiltered.map(c => c.id)
+
+    let priorityCandidate: string | null = null
+
+    if (candidateIds.length > 0) {
+      // Obtener todos los IDs que YA tienen al menos un análisis
+      const { data: withAnalysis } = await service
+        .from('ai_analyses')
+        .select('conversation_id')
+        .in('conversation_id', candidateIds)
+
+      const analyzedSet = new Set((withAnalysis ?? []).map((a: { conversation_id: string }) => a.conversation_id))
+
+      // El primero que NO aparece en analyzedSet es nuestra prioridad 1
+      const firstNever = neverAnalyzedFiltered.find(c => !analyzedSet.has(c.id))
+      if (firstNever) {
+        priorityCandidate = firstNever.id
+      }
     }
 
-    if (!candidates?.length) {
-      return NextResponse.json({ analyzed: false, reason: 'No hay conversaciones pendientes' })
-    }
+    // ── PRIORIDAD 2: con análisis previo pero mensajes nuevos desde entonces ─
+    // Solo se usa si no hay candidatas sin análisis.
+    if (!priorityCandidate) {
+      const { data: candidates, error } = await service
+        .from('conversations')
+        .select(`
+          id,
+          client_phone,
+          remote_jid,
+          last_message_at,
+          last_auto_analysis_at,
+          ai_analyses ( analyzed_at )
+        `)
+        .eq('status', 'active')
+        .neq('status', 'historico')
+        .not('remote_jid', 'ilike', '%@g.us')   // excluir grupos
+        .gte('message_count', MIN_MESSAGES)
+        .gte('last_message_at', sevenDaysAgo)
+        .or(`last_auto_analysis_at.is.null,last_auto_analysis_at.lt.${twoHoursAgo}`)
+        .order('last_message_at', { ascending: true })   // más antiguas sin atender primero
+        .limit(20)
 
-    // Elegir la primera que tenga mensajes nuevos desde el último análisis
-    // y que respete el cooldown mínimo de 30 minutos entre cualquier análisis.
-    type Candidate = {
-      id: string
-      last_message_at: string | null
-      last_auto_analysis_at: string | null
-      ai_analyses: Array<{ analyzed_at: string }> | null
-    }
+      if (error) {
+        console.error('[AutoAnalysis] Error consultando candidatas:', error)
+        return NextResponse.json({ analyzed: false, reason: 'Error interno al consultar' }, { status: 500 })
+      }
 
-    const candidate = (candidates as Candidate[]).find(conv => {
-      const analyses = conv.ai_analyses ?? []
-      const lastAnalyzedAt = analyses.length
-        ? analyses.reduce((latest, a) =>
-            a.analyzed_at > latest ? a.analyzed_at : latest, '')
-        : null
+      type Candidate = {
+        id: string
+        client_phone: string
+        remote_jid: string | null
+        last_message_at: string | null
+        last_auto_analysis_at: string | null
+        ai_analyses: Array<{ analyzed_at: string }> | null
+      }
 
-      // Sin análisis previo → siempre candidata
-      if (!lastAnalyzedAt) return true
+      const found = (candidates as Candidate[]).find(conv => {
+        if (employeePhoneSet.has(conv.client_phone)) return false
+        if (conv.remote_jid?.endsWith('@g.us'))     return false
+        const analyses = conv.ai_analyses ?? []
+        const lastAnalyzedAt = analyses.length
+          ? analyses.reduce((latest, a) => a.analyzed_at > latest ? a.analyzed_at : latest, '')
+          : null
 
-      // Respetar cooldown mínimo de 30 minutos
-      if (lastAnalyzedAt > thirtyMinutesAgo) return false
-
-      // Solo si hay mensajes nuevos desde el último análisis
-      return !!conv.last_message_at && conv.last_message_at > lastAnalyzedAt
-    })
-
-    if (!candidate) {
-      return NextResponse.json({
-        analyzed: false,
-        reason: 'Todas las conversaciones ya están al día',
+        if (!lastAnalyzedAt) return true
+        if (lastAnalyzedAt > thirtyMinutesAgo) return false
+        return !!conv.last_message_at && conv.last_message_at > lastAnalyzedAt
       })
+
+      if (!found) {
+        return NextResponse.json({ analyzed: false, reason: 'Todas las conversaciones ya están al día' })
+      }
+
+      priorityCandidate = found.id
     }
 
-    // Marcar inmediatamente como "en análisis" para evitar que
-    // dos llamadas concurrentes procesen la misma conversación.
+    // Marcar inmediatamente para evitar doble procesamiento concurrente
     await service
       .from('conversations')
       .update({ last_auto_analysis_at: now.toISOString() })
-      .eq('id', candidate.id)
+      .eq('id', priorityCandidate)
 
-    // Ejecutar el análisis (usa el proveedor IA activo: Gemini o Claude)
-    const result = await analyzeConversation(candidate.id, 'auto')
+    const result = await analyzeConversation(priorityCandidate, 'auto')
 
     if (!result.success) {
-      console.error('[AutoAnalysis] Falló el análisis:', result.error)
-      return NextResponse.json({
-        analyzed: false,
-        conversationId: candidate.id,
-        reason: result.error,
-      })
+      if (result.isRateLimit) {
+        // Falla transitoria: liberar el cooldown para que la conversación sea
+        // candidata de nuevo en el próximo ciclo del setInterval.
+        await service
+          .from('conversations')
+          .update({ last_auto_analysis_at: null })
+          .eq('id', priorityCandidate)
+        console.warn(`[AutoAnalysis] Rate limit — conversación ${priorityCandidate} liberada para próximo ciclo`)
+      } else {
+        console.error('[AutoAnalysis] Falló el análisis:', result.error)
+      }
+      return NextResponse.json({ analyzed: false, conversationId: priorityCandidate, reason: result.error })
     }
 
-    console.log(`[AutoAnalysis] ✓ Conversación ${candidate.id} → análisis ${result.analysisId}`)
+    console.log(`[AutoAnalysis] ✓ Conversación ${priorityCandidate} → análisis ${result.analysisId}`)
+    return NextResponse.json({ analyzed: true, conversationId: priorityCandidate, analysisId: result.analysisId })
 
-    return NextResponse.json({
-      analyzed: true,
-      conversationId: candidate.id,
-      analysisId: result.analysisId,
-    })
   } catch (error) {
     console.error('[AutoAnalysis] Error inesperado:', error)
     return NextResponse.json({ analyzed: false, reason: 'Error interno' }, { status: 500 })

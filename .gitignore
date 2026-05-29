@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+
+# Claude Code local permissions (per-machine, no debe ir al repo)
+.claude/
+
+# Carpeta anidada del proyecto (artifact local — copia entera del repo)
+/ph-intelligence/

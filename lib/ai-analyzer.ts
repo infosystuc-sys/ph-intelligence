@@ -1,34 +1,68 @@
 import { createServiceSupabaseClient } from './supabase-server'
 import { AIAnalysisResponse, ConversationStage, Message } from '@/types'
-import { getActiveProvider, callAI, AI_MODELS } from './ai-providers'
+import { getActiveProvider, callAI, AI_MODELS, isRateLimitError } from './ai-providers'
+import { jsonrepair } from 'jsonrepair'
 
-const SYSTEM_PROMPT = `Eres un experto en ventas consultivas de electrodomésticos y artículos para el hogar en Argentina.
-Tu tarea es analizar conversaciones de WhatsApp entre vendedores de Punto Hogar y sus clientes.
-Debes evaluar la calidad de la conversación y generar un informe estructurado en JSON con exactamente este formato:
+const SYSTEM_PROMPT = `Eres un experto en ventas consultivas y fidelización de clientes en el rubro de electrodomésticos y artículos para el hogar en Argentina.
+Tu tarea es auditar conversaciones de WhatsApp entre vendedores de Punto Hogar y clientes de su cartera activa (clientes que ya han comprado anteriormente en la empresa).
+
+Tu objetivo es evaluar si el vendedor actúa de forma proactiva, orientada al cierre de ventas y a la expansión del ticket, evitando el rol pasivo de "solo informar precios".
+
+Debes generar un informe estructurado en JSON con exactamente este formato:
 {
   "quality_score": número del 0 al 100,
-  "strengths": ["virtud 1", "virtud 2", ...],
-  "weaknesses": ["falla 1", "falla 2", ...],
-  "suggestions": ["sugerencia accionable 1", "sugerencia accionable 2", ...],
+  "strengths": ["virtud 1", "virtud 2"],
+  "weaknesses": ["falla 1", "falla 2"],
+  "suggestions": ["sugerencia accionable 1", "sugerencia accionable 2"],
   "conversation_stage": "new|negotiation|proposal|closed_won|closed_lost",
   "talk_ratio_vendor": porcentaje de mensajes del vendedor (0-100),
   "talk_ratio_client": porcentaje de mensajes del cliente (0-100),
-  "keywords_detected": ["palabra clave 1", ...],
+  "keywords_detected": ["palabra clave 1"],
   "sentiment": "positive|neutral|negative",
-  "executive_summary": "resumen ejecutivo de 2-3 oraciones para el gerente",
-  "vendor_coaching_note": "nota privada de coaching dirigida directamente al vendedor, en tono constructivo y motivador"
+  "executive_summary": "resumen ejecutivo de 2-3 oraciones para el gerente enfocado en la oportunidad comercial",
+  "vendor_coaching_note": "nota privada de coaching dirigida al vendedor, indicando qué táctica usar en su próximo mensaje o cómo mejorar su técnica de cierre"
 }
 
-Criterios de evaluación del quality_score:
-- Saludo profesional y presentación (10 pts)
-- Detección y comprensión de la necesidad del cliente (20 pts)
-- Conocimiento del producto y argumentación (20 pts)
-- Manejo de objeciones (15 pts)
-- Propuesta de valor clara (15 pts)
-- Seguimiento y cierre (15 pts)
-- Ortografía y comunicación escrita (5 pts)
+Criterios de evaluación estrictos para el quality_score:
+- Saludo, empatía y fidelización (10 pts): ¿Reconoce al cliente? ¿El trato es cálido y personalizado al estilo argentino?
+- Indagación activa (15 pts): ¿Hace preguntas para entender el uso que se le dará al producto o simplemente responde lo que le preguntan?
+- Argumentación y Venta Cruzada (Upselling/Cross-selling) (20 pts): ¿Ofreció un modelo superior, accesorios, garantía extendida o alternativas si no hay stock?
+- Manejo de objeciones y fricción (15 pts): ¿Resuelve dudas sobre precios/pagos con solidez sin dejar enfriar el chat?
+- Actitud Proactiva de Cierre (25 pts): PENALIZA severamente si el vendedor solo envía precios y espera. PREMIA si el vendedor utiliza llamados a la acción claros, genera urgencia o facilita el link/método de pago.
+- Ortografía, claridad y formato (10 pts): ¿Usa audios largos innecesarios o textos claros y fáciles de leer?
 
-Responde ÚNICAMENTE con el JSON, sin texto adicional.`
+Responde ÚNICAMENTE con el JSON válido, sin formato markdown de bloques de código y sin texto introductorio o de despedida.`
+
+function extractJSON(raw: string): string {
+  // Quitar fences de markdown (con o sin tag de lenguaje)
+  const fenced = raw.match(/```(?:\w+)?\s*([\s\S]*?)```/)
+  if (fenced?.[1]?.trim()) return fenced[1].trim()
+  // Extraer el objeto JSON más externo por posición, no por regex greedy
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start !== -1 && end > start) return raw.slice(start, end + 1)
+  return raw.trim()
+}
+
+// Parse robusto: intenta JSON.parse normal y si falla intenta repararlo.
+// Los LLMs a veces dejan comillas sin escapar, comas finales, o caracteres
+// de control dentro de strings. jsonrepair maneja estos casos.
+function parseLLMJSON(raw: string): unknown {
+  const cleaned = extractJSON(raw)
+  try {
+    return JSON.parse(cleaned)
+  } catch (firstErr) {
+    try {
+      const repaired = jsonrepair(cleaned)
+      const result = JSON.parse(repaired)
+      console.warn('[AI] JSON reparado con jsonrepair (parse original falló:', (firstErr as Error).message + ')')
+      return result
+    } catch {
+      // Si la reparación también falla, lanzar el error original (más informativo)
+      throw firstErr
+    }
+  }
+}
 
 // ── Motor de Análisis IA ──────────────────────────────────────────────────────
 export async function analyzeConversation(
@@ -38,6 +72,7 @@ export async function analyzeConversation(
   success: boolean
   analysisId?: string
   error?: string
+  isRateLimit?: boolean
 }> {
   const supabase = createServiceSupabaseClient()
   const startTime = Date.now()
@@ -58,6 +93,26 @@ export async function analyzeConversation(
       duration_ms: Date.now() - startTime,
     })
     return { success: false, error: 'Conversación no encontrada' }
+  }
+
+  // Excluir conversaciones archivadas en histórico (auto, batch y manual)
+  if (conversation.status === 'historico') {
+    return { success: false, error: 'Conversación en histórico, excluida del análisis' }
+  }
+
+  // Excluir grupos de WhatsApp (auto, batch y manual)
+  if (typeof conversation.remote_jid === 'string' && conversation.remote_jid.endsWith('@g.us')) {
+    return { success: false, error: 'Conversación de grupo, excluida del análisis' }
+  }
+
+  // Excluir conversaciones de empleados (auto, batch y manual)
+  const { data: employeeMatch } = await supabase
+    .from('employee_phones')
+    .select('id')
+    .eq('phone', conversation.client_phone)
+    .maybeSingle()
+  if (employeeMatch) {
+    return { success: false, error: 'Conversación de empleado, excluida del análisis' }
   }
 
   const { data: messages, error: msgError } = await supabase
@@ -109,33 +164,46 @@ Genera el análisis completo en JSON.`
   const provider = await getActiveProvider()
   let analysisData: AIAnalysisResponse
 
+  let rawText = ''
   try {
-    const rawText = await callAI({
+    rawText = await callAI({
       provider,
       systemPrompt: SYSTEM_PROMPT,
       userPrompt,
       maxTokens: 2048,
     })
 
-    // Extraer JSON (puede venir con ```json ... ```)
-    const jsonMatch = rawText.match(/```json\s*([\s\S]*?)\s*```/) ??
-                      rawText.match(/\{[\s\S]*\}/)
-    const jsonStr = jsonMatch ? (jsonMatch[1] ?? jsonMatch[0]) : rawText
-
-    analysisData = JSON.parse(jsonStr) as AIAnalysisResponse
+    analysisData = parseLLMJSON(rawText) as AIAnalysisResponse
   } catch (e) {
-    const errMsg = `Error en análisis IA (${provider}): ${String(e)}`
-    await supabase.from('analysis_logs').insert({
-      conversation_id: conversationId,
-      vendedor_id: conversation.vendedor_id,
-      triggered_by: triggeredBy,
-      status: 'error',
-      model_used: AI_MODELS[provider],
-      error_message: errMsg.slice(0, 500),
-      duration_ms: Date.now() - startTime,
-      message_count: messages.length,
-    })
-    return { success: false, error: errMsg }
+    if (e instanceof SyntaxError) {
+      console.error(`[AI] JSON.parse fallo. Raw text (primeros 500 chars):`)
+      console.error(rawText.slice(0, 500))
+      console.error(`[AI] extractJSON devolvio (primeros 200 chars):`)
+      console.error(extractJSON(rawText).slice(0, 200))
+    }
+    const rateLimit = isRateLimitError(e)
+    const errMsg = rateLimit
+      ? `Rate limit (${provider}): reintentos agotados. La conversación se reintentará en el próximo ciclo.`
+      : `Error en análisis IA (${provider}): ${String(e)}`
+
+    // Los errores de rate limit son transitorios: no los persistimos como fallas
+    // para no contaminar el historial de logs ni penalizar la conversación.
+    if (!rateLimit) {
+      await supabase.from('analysis_logs').insert({
+        conversation_id: conversationId,
+        vendedor_id: conversation.vendedor_id,
+        triggered_by: triggeredBy,
+        status: 'error',
+        model_used: AI_MODELS[provider],
+        error_message: errMsg.slice(0, 500),
+        duration_ms: Date.now() - startTime,
+        message_count: messages.length,
+      })
+    } else {
+      console.warn(`[AI] ${errMsg} (conv: ${conversationId})`)
+    }
+
+    return { success: false, error: errMsg, isRateLimit: rateLimit }
   }
 
   // 4. Validar y sanitizar datos
@@ -190,17 +258,7 @@ Genera el análisis completo en JSON.`
     message_count: messages.length,
   })
 
-  // 6. Si la IA detecta conversación cerrada → pasar a historico automáticamente
-  const isClosed = ['closed_won', 'closed_lost'].includes(safeAnalysis.conversation_stage)
-  if (isClosed) {
-    await supabase
-      .from('conversations')
-      .update({ status: 'historico' })
-      .eq('id', conversationId)
-      .neq('status', 'historico')
-  }
-
-  // 7. Actualizar KPIs del día
+  // 6. Actualizar KPIs del día
   await updateDailyKpis(conversation.vendedor_id)
 
   return { success: true, analysisId: savedAnalysis.id }
@@ -245,13 +303,21 @@ async function updateDailyKpis(vendedorId: string): Promise<void> {
   const supabase = createServiceSupabaseClient()
   const today = new Date().toISOString().split('T')[0]
 
-  // Calcular métricas del día
-  const { data: conversations } = await supabase
+  // Calcular métricas del día — solo conversaciones de clientes
+  // (excluir grupos y teléfonos de empleados de los conteos)
+  const { data: empPhones } = await supabase.from('employee_phones').select('phone')
+  const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+  const { data: rawConversations } = await supabase
     .from('conversations')
-    .select('id, status, last_message_at')
+    .select('id, status, remote_jid, client_phone, last_message_at')
     .eq('vendedor_id', vendedorId)
 
-  if (!conversations) return
+  if (!rawConversations) return
+
+  const conversations = rawConversations.filter(c =>
+    !c.remote_jid?.endsWith('@g.us') && !employeePhoneSet.has(c.client_phone)
+  )
 
   const now = new Date()
   const h24ago = new Date(now.getTime() - 24 * 60 * 60 * 1000)

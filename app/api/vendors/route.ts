@@ -46,10 +46,79 @@ export async function GET(req: NextRequest) {
       (instances ?? []).map(i => [i.vendedor_id, i])
     )
 
-    const enriched = (data ?? []).map(v => ({
-      ...v,
-      whatsapp_instance: instanceByVendor[v.id] ?? null,
-    }))
+    // ── Conteo LIVE por vendedor — excluyendo grupos y empleados.
+    // Los daily_kpis pueden tener valores stale; recalculamos en vivo para el dashboard.
+    const { data: empPhones } = await service.from('employee_phones').select('phone')
+    const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+    const { data: allConvs } = await service
+      .from('conversations')
+      .select('vendedor_id, status, remote_jid, client_phone, last_message_at')
+
+    const now = new Date()
+    const h24ago = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+
+    type ConvRow = {
+      vendedor_id: string | null
+      status: string
+      remote_jid: string | null
+      client_phone: string
+      last_message_at: string | null
+    }
+    const liveCountByVendor: Record<string, { total: number; unresponded: number }> = {}
+    ;(allConvs as ConvRow[] ?? []).forEach(c => {
+      if (c.remote_jid?.endsWith('@g.us')) return
+      if (employeePhoneSet.has(c.client_phone)) return
+      const vid = c.vendedor_id
+      if (!vid) return
+      if (!liveCountByVendor[vid]) liveCountByVendor[vid] = { total: 0, unresponded: 0 }
+      liveCountByVendor[vid].total++
+      if (c.status === 'active' && c.last_message_at && new Date(c.last_message_at) < h24ago) {
+        liveCountByVendor[vid].unresponded++
+      }
+    })
+
+    const today = new Date().toISOString().split('T')[0]
+
+    type VendorRow = {
+      id: string
+      daily_kpis?: Array<{
+        date: string
+        avg_quality_score: number
+        conversations_total: number
+        conversations_unresponded_24h: number
+      }> | null
+    }
+
+    const enriched = (data ?? []).map((v: VendorRow & Record<string, unknown>) => {
+      const live = liveCountByVendor[v.id] ?? { total: 0, unresponded: 0 }
+      // Reemplazar los conteos del KPI de HOY con los live filtrados
+      const patchedKpis = (v.daily_kpis ?? []).map(k => {
+        if (k.date !== today) return k
+        return {
+          ...k,
+          conversations_total:           live.total,
+          conversations_unresponded_24h: live.unresponded,
+        }
+      })
+      // Si no había KPI de hoy todavía, agregar uno sintético con los conteos live
+      // para que el dashboard tenga al menos algo que mostrar
+      const hasTodayKpi = patchedKpis.some(k => k.date === today)
+      if (!hasTodayKpi && (live.total > 0 || live.unresponded > 0)) {
+        patchedKpis.push({
+          date: today,
+          avg_quality_score: 0,
+          conversations_total: live.total,
+          conversations_unresponded_24h: live.unresponded,
+        })
+      }
+
+      return {
+        ...v,
+        daily_kpis: patchedKpis,
+        whatsapp_instance: instanceByVendor[v.id] ?? null,
+      }
+    })
 
     return NextResponse.json({ data: enriched })
   } catch (error) {

@@ -29,7 +29,7 @@ const navItems = [
   { href: '/vendors',          label: 'Vendedores',            icon: Users,           roles: ['admin', 'supervisor'] },
   { href: '/pipeline',         label: 'Pipeline',              icon: Kanban,          roles: ['admin', 'supervisor'] },
   { href: '/employee-phones',  label: 'Teléfonos Empleados',   icon: PhoneOff,        roles: ['admin', 'supervisor', 'vendedor'] },
-  { href: '/base-tn',          label: 'Base Tarjeta Naranja',  icon: CreditCard,      roles: ['admin'] },
+  { href: '/base-clientes',    label: 'Base Clientes',         icon: CreditCard,      roles: ['admin'] },
   { href: '/settings',         label: 'Configuración',         icon: Settings,        roles: ['admin'] },
 ]
 
