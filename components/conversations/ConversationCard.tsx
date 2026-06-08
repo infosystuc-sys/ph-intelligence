@@ -268,9 +268,21 @@ export default function ConversationCard({
 
           {/* Esquina derecha: tiempo + score (o "sin análisis") */}
           <div className="flex flex-col items-end gap-1 shrink-0">
-            <span className={`text-xs leading-tight ${needsAttention ? 'text-amber-500 font-semibold' : 'text-muted'}`}>
-              {timeAgo}
-            </span>
+            {(() => {
+              // Última conexión por color:
+              //   amber = sin respuesta hace +24h (prioridad máxima — needsAttention)
+              //   azul  = último mensaje del cliente (esperando respuesta del vendedor)
+              //   gris  = último mensaje propio (vendedor) o sin datos
+              const lastFromClient = conversation.last_message?.from_me === false
+              const cls = needsAttention      ? 'text-amber-500 font-semibold'
+                       : lastFromClient       ? 'text-blue-600 font-semibold'
+                                              : 'text-muted'
+              return (
+                <span className={`text-sm leading-tight ${cls}`}>
+                  {timeAgo}
+                </span>
+              )
+            })()}
             {analysis ? (
               <ScoreBadge score={(analysis as { quality_score: number }).quality_score} size="md" />
             ) : !isGroup && (

@@ -87,6 +87,8 @@ export async function POST() {
       localidad:   string | null
       tarjetas:    Set<string>
       observacion: string | null
+      telefono_1:  string | null
+      telefono_2:  string | null
     }
     const phoneMap = new Map<string, AccEntry>()
 
@@ -103,6 +105,8 @@ export async function POST() {
           if (!existing.cuit_dni    && row.cuit_dni)    existing.cuit_dni    = row.cuit_dni
           if (!existing.localidad   && row.localidad)   existing.localidad   = row.localidad
           if (!existing.observacion && row.observacion) existing.observacion = row.observacion
+          if (!existing.telefono_1  && row.telefono_1)  existing.telefono_1  = row.telefono_1
+          if (!existing.telefono_2  && row.telefono_2)  existing.telefono_2  = row.telefono_2
         } else {
           const tarjetas = new Set<string>()
           if (row.tarjeta) tarjetas.add(row.tarjeta)
@@ -112,13 +116,21 @@ export async function POST() {
             localidad:   row.localidad   ?? null,
             tarjetas,
             observacion: row.observacion ?? null,
+            telefono_1:  row.telefono_1  ?? null,
+            telefono_2:  row.telefono_2  ?? null,
           })
         }
       }
     }
 
-    // 3) Limpiar los campos base_* de TODAS las conversaciones antes de re-matchear
-    //    (para que las que perdieron el match queden limpias)
+    // 3) Cargar teléfonos de empleados — se excluyen del match igual que en el resto
+    //    de la app (dashboard, pipeline, conversaciones, KPIs).
+    const { data: empPhones } = await service.from('employee_phones').select('phone')
+    const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+    // 4) Limpiar los campos base_* SOLO de las conversaciones elegibles (no histórico,
+    //    no grupos). Las históricas/grupos no deberían tener base_* seteado de todas
+    //    formas; al limitarlo evitamos tocar filas que no nos corresponden.
     await service
       .from('conversations')
       .update({
@@ -128,22 +140,43 @@ export async function POST() {
         base_tarjetas:    [],
         base_observacion: null,
       })
-      .not('id', 'is', null)
+      .neq('status', 'historico')
+      .not('remote_jid', 'ilike', '%@g.us')
 
-    // 4) Cargar todas las conversaciones (paginado)
+    // 5) Cargar conversaciones elegibles (paginado, con los filtros aplicados a nivel SQL).
+    //    PostgREST cap-ea .select() a 1000 — hay que paginar manualmente.
+    //    Joineamos con whatsapp_instances y users para tener instancia + vendedor en
+    //    la respuesta sin queries extra.
     type ConvRow = {
-      id: string
+      id:           string
       client_phone: string
       client_name:  string | null
       display_name: string | null
+      status:       string
+      instance:     { instance_name: string | null } | null
+      vendedor:     { full_name: string | null }    | null
     }
-    let convs: ConvRow[]
+    const convs: ConvRow[] = []
     try {
-      convs = await fetchAllPaginated<ConvRow>(
-        service,
-        'conversations',
-        'id, client_phone, client_name, display_name',
-      )
+      const PAGE = 1000
+      let from = 0
+      while (true) {
+        const { data, error } = await service
+          .from('conversations')
+          .select(`
+            id, client_phone, client_name, display_name, status,
+            instance:whatsapp_instances!instance_id(instance_name),
+            vendedor:users!vendedor_id(full_name)
+          `)
+          .neq('status', 'historico')
+          .not('remote_jid', 'ilike', '%@g.us')
+          .range(from, from + PAGE - 1)
+        if (error) throw error
+        if (!data || data.length === 0) break
+        convs.push(...(data as unknown as ConvRow[]))
+        if (data.length < PAGE) break
+        from += PAGE
+      }
     } catch (e) {
       return NextResponse.json({ error: e instanceof Error ? e.message : 'Error leyendo conversaciones' }, { status: 500 })
     }
@@ -154,16 +187,22 @@ export async function POST() {
       client_phone:       string
       display_name:       string | null
       client_name:        string | null
+      status:             string
+      instance_name:      string | null
+      vendedor_name:      string | null
       base_cliente:       string | null
       base_cuit_dni:      string | null
       base_localidad:     string | null
       base_tarjetas:      string[]
       base_observacion:   string | null
+      base_telefono_1:    string | null
+      base_telefono_2:    string | null
     }
     const updates: UpdateRow[] = []
 
     for (const conv of convs) {
       if (!conv.client_phone) continue
+      if (employeePhoneSet.has(conv.client_phone)) continue   // excluir empleados
       const norm = normalizePhone(conv.client_phone)
       if (norm.length < 9) continue
       const key = norm.slice(-9)
@@ -174,11 +213,16 @@ export async function POST() {
           client_phone:       conv.client_phone,
           display_name:       conv.display_name ?? null,
           client_name:        conv.client_name  ?? null,
+          status:             conv.status,
+          instance_name:      conv.instance?.instance_name ?? null,
+          vendedor_name:      conv.vendedor?.full_name     ?? null,
           base_cliente:       match.cliente,
           base_cuit_dni:      match.cuit_dni,
           base_localidad:     match.localidad,
           base_tarjetas:      [...match.tarjetas],
           base_observacion:   match.observacion,
+          base_telefono_1:    match.telefono_1,
+          base_telefono_2:    match.telefono_2,
         })
       }
     }
@@ -207,6 +251,9 @@ export async function POST() {
       matched: updates.length,
       items: updates.map(u => ({
         conversation_id: u.id,
+        instance:        u.instance_name,
+        vendedor:        u.vendedor_name,
+        status:          u.status,
         phone:           u.client_phone,
         whatsapp_name:   u.display_name ?? u.client_name ?? null,
         cliente:         u.base_cliente,
@@ -214,6 +261,8 @@ export async function POST() {
         localidad:       u.base_localidad,
         tarjetas:        u.base_tarjetas,
         observacion:     u.base_observacion,
+        telefono_1:      u.base_telefono_1,
+        telefono_2:      u.base_telefono_2,
       })),
     })
   } catch (err) {

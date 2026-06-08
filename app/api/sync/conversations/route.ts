@@ -16,6 +16,12 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({}))
     const instanceId = body?.instanceId as string | undefined
+    // daysBack: ventana temporal del backfill. Por default 15. Configurable para
+    // recuperaciones puntuales (ej. corte de un servicio externo).
+    const rawDaysBack = body?.daysBack
+    const daysBack = typeof rawDaysBack === 'number' && rawDaysBack > 0 && rawDaysBack <= 90
+      ? Math.floor(rawDaysBack)
+      : 15
 
     const serviceSupabase = createServiceSupabaseClient()
 
@@ -44,7 +50,7 @@ export async function POST(req: NextRequest) {
 
     // Sincronizar en paralelo
     const results = await Promise.allSettled(
-      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance, 15))
+      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance, daysBack))
     )
 
     const totals = results.reduce(
@@ -64,8 +70,9 @@ export async function POST(req: NextRequest) {
     )
 
     return NextResponse.json({
-      message: `Sincronización completada`,
+      message: `Sincronización completada (ventana: ${daysBack} días)`,
       instances: instances.length,
+      daysBack,
       ...totals,
       errorLog: totals.errorLog.slice(0, 100),
     })

@@ -61,6 +61,34 @@ export default function SettingsPage() {
   const [recalculating, setRecalculating] = useState(false)
   const [recalcMsg, setRecalcMsg] = useState('')
 
+  // Backfill de conversaciones (recuperar desde Evolution con ventana configurable)
+  const [backfillDays, setBackfillDays] = useState(13)
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillResult, setBackfillResult] = useState<{
+    instances: number
+    daysBack: number
+    synced: number
+    errors: number
+    skipped: number
+    chatsFound: number
+    errorLog: string[]
+  } | null>(null)
+  const [backfillError, setBackfillError] = useState<string | null>(null)
+
+  // Backfill DB-driven: itera conversaciones existentes y refresca mensajes desde Evolution
+  const [dbBackfillMsgs, setDbBackfillMsgs] = useState(200)
+  const [dbBackfilling, setDbBackfilling] = useState(false)
+  const [dbBackfillResult, setDbBackfillResult] = useState<{
+    instances: number
+    messagesPerChat: number
+    conversationsTried: number
+    conversationsUpdated: number
+    messagesInserted: number
+    errors: number
+    errorLog: string[]
+  } | null>(null)
+  const [dbBackfillError, setDbBackfillError] = useState<string | null>(null)
+
   // Vincular base de clientes con conversaciones
   type MatchItem = {
     conversation_id: string
@@ -289,6 +317,68 @@ export default function SettingsPage() {
     setRecalcMsg(data.error ?? `Recalculadas ${data.updated} de ${data.total} conversaciones.`)
     setRecalculating(false)
     await loadData()
+  }
+
+  const runBackfill = async () => {
+    setBackfilling(true)
+    setBackfillError(null)
+    setBackfillResult(null)
+    try {
+      const res = await fetch('/api/sync/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ daysBack: backfillDays }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setBackfillError(data.error ?? 'Error en el backfill')
+      } else {
+        setBackfillResult({
+          instances:  data.instances  ?? 0,
+          daysBack:   data.daysBack   ?? backfillDays,
+          synced:     data.synced     ?? 0,
+          errors:     data.errors     ?? 0,
+          skipped:    data.skipped    ?? 0,
+          chatsFound: data.chatsFound ?? 0,
+          errorLog:   data.errorLog   ?? [],
+        })
+      }
+    } catch (e) {
+      setBackfillError(e instanceof Error ? e.message : 'Error de conexión')
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
+  const runDbBackfill = async () => {
+    setDbBackfilling(true)
+    setDbBackfillError(null)
+    setDbBackfillResult(null)
+    try {
+      const res = await fetch('/api/sync/messages-existing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messagesPerChat: dbBackfillMsgs }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setDbBackfillError(data.error ?? 'Error en el backfill DB-driven')
+      } else {
+        setDbBackfillResult({
+          instances:            data.instances            ?? 0,
+          messagesPerChat:      data.messagesPerChat      ?? dbBackfillMsgs,
+          conversationsTried:   data.conversationsTried   ?? 0,
+          conversationsUpdated: data.conversationsUpdated ?? 0,
+          messagesInserted:     data.messagesInserted     ?? 0,
+          errors:               data.errors               ?? 0,
+          errorLog:             data.errorLog             ?? [],
+        })
+      }
+    } catch (e) {
+      setDbBackfillError(e instanceof Error ? e.message : 'Error de conexión')
+    } finally {
+      setDbBackfilling(false)
+    }
   }
 
   const deleteLogs = async (scope: 'vendor' | 'all') => {
@@ -1443,6 +1533,179 @@ export default function SettingsPage() {
       {/* ── Tab: Mantenimiento ─────────────────────────────────────────────── */}
       {activeTab === 'maintenance' && (
         <div className="space-y-6">
+
+          {/* Backfill desde Evolution API */}
+          <div className="bg-surface rounded-lg border border-border p-5 space-y-4">
+            <div>
+              <h3 className="font-semibold text-body flex items-center gap-2">
+                <RefreshCw size={16} className="text-primary" /> Recuperar conversaciones desde Evolution
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Lee los chats y mensajes de cada instancia desde Evolution API y los upsertea en Supabase.
+                Útil cuando N8N estuvo caído o se perdió procesamiento de webhooks.
+                <br />
+                <span className="text-gray-400">
+                  Idempotente: dedupea mensajes por <code className="bg-gray-100 px-1 rounded text-[10px]">external_id</code> y no pisa
+                  <code className="bg-gray-100 px-1 rounded text-[10px]">status</code> ni
+                  <code className="bg-gray-100 px-1 rounded text-[10px]">client_name</code> de conversaciones existentes.
+                </span>
+              </p>
+            </div>
+
+            <div className="flex items-end gap-3 flex-wrap">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Ventana (días hacia atrás)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={90}
+                  value={backfillDays}
+                  onChange={e => {
+                    const v = parseInt(e.target.value)
+                    if (!isNaN(v) && v >= 1 && v <= 90) setBackfillDays(v)
+                  }}
+                  disabled={backfilling}
+                  className="w-28 border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-gray-50"
+                />
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  Hoy {new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })} ·
+                  Trae chats con actividad desde el {new Date(Date.now() - backfillDays * 24 * 60 * 60 * 1000).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}
+                </p>
+              </div>
+
+              <button
+                onClick={runBackfill}
+                disabled={backfilling}
+                className="flex items-center gap-2 bg-primary hover:bg-primary-dark text-white text-sm font-semibold px-4 py-2 rounded-md disabled:opacity-50 transition-colors"
+              >
+                {backfilling
+                  ? <><Loader2 size={14} className="animate-spin" /> Recuperando… (puede tardar varios min)</>
+                  : <><RefreshCw size={14} /> Ejecutar backfill</>
+                }
+              </button>
+            </div>
+
+            {backfillError && (
+              <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span>{backfillError}</span>
+              </div>
+            )}
+
+            {backfillResult && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-md px-3 py-2">
+                  <CheckCircle size={14} />
+                  <span>
+                    Backfill completado · ventana {backfillResult.daysBack} días ·
+                    {' '}<strong>{backfillResult.instances}</strong> instancias ·
+                    {' '}<strong>{backfillResult.synced}</strong> chats sincronizados ·
+                    {' '}<strong>{backfillResult.skipped}</strong> fuera de ventana ·
+                    {' '}<strong className={backfillResult.errors > 0 ? 'text-red-600' : ''}>{backfillResult.errors}</strong> errores
+                  </span>
+                </div>
+                {backfillResult.errorLog.length > 0 && (
+                  <details className="text-xs">
+                    <summary className="cursor-pointer text-gray-500 hover:text-body">
+                      Ver {backfillResult.errorLog.length} error(es)
+                    </summary>
+                    <pre className="mt-2 bg-gray-50 border border-border rounded p-2 max-h-48 overflow-auto text-[10px] font-mono">
+                      {backfillResult.errorLog.join('\n')}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Backfill DB-driven (cuando listChats trae metadata stale) */}
+          <div className="bg-surface rounded-lg border border-border p-5 space-y-4">
+            <div>
+              <h3 className="font-semibold text-body flex items-center gap-2">
+                <RefreshCw size={16} className="text-primary" /> Refrescar mensajes de conversaciones existentes
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Alternativa cuando el backfill normal devuelve "0 chats sincronizados". Itera las
+                conversaciones que ya tenés en Supabase y, para cada una, le pide a Evolution
+                <code className="bg-gray-100 px-1 rounded text-[10px] mx-1">getMessages(jid)</code>
+                directamente. Salta el filtro de <code className="bg-gray-100 px-1 rounded text-[10px]">listChats</code>
+                de Evolution, que puede estar stale tras una caída.
+                <br />
+                <span className="text-gray-400">
+                  No descubre conversaciones nuevas — las nuevas tienen que entrar por el flujo de N8N.
+                </span>
+              </p>
+            </div>
+
+            <div className="flex items-end gap-3 flex-wrap">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Mensajes por chat
+                </label>
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  step={50}
+                  value={dbBackfillMsgs}
+                  onChange={e => {
+                    const v = parseInt(e.target.value)
+                    if (!isNaN(v) && v >= 10 && v <= 500) setDbBackfillMsgs(v)
+                  }}
+                  disabled={dbBackfilling}
+                  className="w-28 border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-gray-50"
+                />
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  Cuantos más, más profundo el backfill pero más lento.
+                </p>
+              </div>
+
+              <button
+                onClick={runDbBackfill}
+                disabled={dbBackfilling}
+                className="flex items-center gap-2 bg-primary hover:bg-primary-dark text-white text-sm font-semibold px-4 py-2 rounded-md disabled:opacity-50 transition-colors"
+              >
+                {dbBackfilling
+                  ? <><Loader2 size={14} className="animate-spin" /> Refrescando… (puede tardar 5-15 min)</>
+                  : <><RefreshCw size={14} /> Refrescar desde conversaciones existentes</>
+                }
+              </button>
+            </div>
+
+            {dbBackfillError && (
+              <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span>{dbBackfillError}</span>
+              </div>
+            )}
+
+            {dbBackfillResult && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-md px-3 py-2">
+                  <CheckCircle size={14} />
+                  <span>
+                    Refresh completado · {dbBackfillResult.messagesPerChat} msgs/chat ·
+                    {' '}<strong>{dbBackfillResult.conversationsTried}</strong> conversaciones revisadas ·
+                    {' '}<strong>{dbBackfillResult.conversationsUpdated}</strong> con mensajes nuevos ·
+                    {' '}<strong>{dbBackfillResult.messagesInserted}</strong> mensajes presentados a Supabase ·
+                    {' '}<strong className={dbBackfillResult.errors > 0 ? 'text-red-600' : ''}>{dbBackfillResult.errors}</strong> errores
+                  </span>
+                </div>
+                {dbBackfillResult.errorLog.length > 0 && (
+                  <details className="text-xs">
+                    <summary className="cursor-pointer text-gray-500 hover:text-body">
+                      Ver {dbBackfillResult.errorLog.length} error(es)
+                    </summary>
+                    <pre className="mt-2 bg-gray-50 border border-border rounded p-2 max-h-48 overflow-auto text-[10px] font-mono">
+                      {dbBackfillResult.errorLog.join('\n')}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Archivar todo */}
           <div className="bg-surface rounded-lg border border-border p-5 space-y-4">

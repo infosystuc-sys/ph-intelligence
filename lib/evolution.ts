@@ -208,10 +208,15 @@ export async function syncInstanceConversations(
   const allChats = await client.listChats()
   console.log(`[Sync] ${instance.instance_name}: ${allChats.length} chats en Evolution API`)
 
-  // Filtrar: solo individuales y con actividad dentro del período
+  // Filtrar: solo individuales y con actividad dentro del período.
+  // - @g.us  → grupos
+  // - @lid   → "Linked IDs" de WhatsApp Communities / usuarios con número oculto.
+  //            NO son conversaciones con clientes, sino identificadores opacos.
   const chats = allChats.filter(chat => {
     const jid = chat.remoteJid || chat.id
-    if (!jid || jid.endsWith('@g.us')) return false
+    if (!jid) return false
+    if (jid.endsWith('@g.us')) return false
+    if (jid.endsWith('@lid')) return false
 
     // Obtener timestamp: messageTimestamp (segundos) o updatedAt (ISO string) como fallback
     const ts = chat.lastMessage?.messageTimestamp
@@ -238,48 +243,71 @@ export async function syncInstanceConversations(
       if (!jid) continue
       const phone = jid.replace('@s.whatsapp.net', '').replace('@g.us', '')
 
-      // Upsert conversación — NO incluimos last_message_at aquí para no
-      // sobreescribir valores correctos con datos incorrectos del campo chat.lastMessage
-      const { data: conv, error: convError } = await supabase
-        .from('conversations')
-        .upsert({
-          instance_id: instance.id,
-          remote_jid: jid,
-          vendedor_id: instance.vendedor_id,
-          client_name: chat.name ?? null,
-          client_phone: phone,
-          status: 'active',
-        }, { onConflict: 'instance_id,remote_jid' })
-        .select()
-        .single()
+      // PATCH DEFENSIVO (backfill 27/5-8/6):
+      // En vez de upsert (que pisaba status='active' y client_name de filas existentes),
+      // primero buscamos. Si existe, la respetamos tal como está. Si no existe, INSERT
+      // con los defaults. Así un sync de recuperación nunca reabre conversaciones que
+      // el vendedor cerró manualmente ni sobreescribe nombres editados.
+      let conv: { id: string; client_name: string | null } | null = null
 
-      if (convError || !conv) {
-        const msg = `${phone}: ${convError?.message ?? 'sin datos'}`
-        console.error(`[Sync] Error upsert ${msg}`)
-        if (errorLog.length < 100) errorLog.push(msg)
-        errors++
-        continue
+      const { data: existing } = await supabase
+        .from('conversations')
+        .select('id, client_name')
+        .eq('instance_id', instance.id)
+        .eq('remote_jid', jid)
+        .maybeSingle()
+
+      if (existing) {
+        conv = existing
+      } else {
+        const { data: inserted, error: insertError } = await supabase
+          .from('conversations')
+          .insert({
+            instance_id: instance.id,
+            remote_jid: jid,
+            vendedor_id: instance.vendedor_id,
+            client_name: chat.name ?? null,
+            client_phone: phone,
+            status: 'active',
+          })
+          .select('id, client_name')
+          .single()
+
+        if (insertError || !inserted) {
+          const msg = `${phone}: ${insertError?.message ?? 'sin datos'}`
+          console.error(`[Sync] Error insert ${msg}`)
+          if (errorLog.length < 100) errorLog.push(msg)
+          errors++
+          continue
+        }
+        conv = inserted
       }
 
-      // Sincronizar mensajes
+      // Sincronizar mensajes — un mensaje con payload inesperado de Evolution
+      // no debe abortar el chat completo (perderíamos los otros 99 mensajes).
       const messages = await client.getMessages(jid, 100)
       let maxMsgTs = 0
       for (const msg of messages) {
-        const content = extractMessageContent(msg)
-        if (!content) continue
+        try {
+          const content = extractMessageContent(msg)
+          if (!content) continue
 
-        const ts = (msg.messageTimestamp ?? 0) * 1000
-        if (ts > maxMsgTs) maxMsgTs = ts
+          const ts = (msg.messageTimestamp ?? 0) * 1000
+          if (ts > maxMsgTs) maxMsgTs = ts
 
-        await supabase.from('messages').upsert({
-          conversation_id: conv.id,
-          external_id: msg.key.id,
-          content,
-          type: detectMessageType(msg),
-          from_me: msg.key.fromMe,
-          msg_timestamp: ts > 0 ? new Date(ts).toISOString() : new Date().toISOString(),
-          media_url: extractMediaUrl(msg),
-        }, { onConflict: 'external_id', ignoreDuplicates: true })
+          await supabase.from('messages').upsert({
+            conversation_id: conv.id,
+            external_id: msg.key.id,
+            content,
+            type: detectMessageType(msg),
+            from_me: msg.key.fromMe,
+            msg_timestamp: ts > 0 ? new Date(ts).toISOString() : new Date().toISOString(),
+            media_url: extractMediaUrl(msg),
+          }, { onConflict: 'external_id', ignoreDuplicates: true })
+        } catch (e) {
+          console.warn(`[Sync] ${instance.instance_name}: msg ${msg?.key?.id ?? '?'} omitido —`, e instanceof Error ? e.message : e)
+          // continuar con el siguiente mensaje
+        }
       }
 
       // Actualizar last_message_at con el timestamp real del mensaje más reciente.
@@ -319,9 +347,142 @@ export async function syncInstanceConversations(
   return { synced, errors, skipped, chatsFound: allChats.length, errorLog }
 }
 
+/**
+ * Backfill DB-driven: itera las conversaciones que YA tenemos en Supabase para esta
+ * instancia y, para cada una, le pide a Evolution los últimos `messagesPerChat` mensajes
+ * via getMessages(remote_jid). Útil cuando listChats devuelve metadata stale (típico
+ * tras una caída del servicio) pero getMessages sí trae los mensajes reales.
+ *
+ * No descubre conversaciones nuevas — solo refresca las existentes. Las conversaciones
+ * realmente nuevas tienen que entrar por el flujo normal (N8N → webhook → upsert).
+ */
+export async function backfillMessagesForExistingConvs(
+  instance: WhatsappInstance,
+  messagesPerChat = 200,
+): Promise<{
+  conversationsTried:    number
+  conversationsUpdated:  number
+  messagesInserted:      number   // estimado: cuántos pasaron al upsert (la dedup puede descartar varios)
+  errors:                number
+  errorLog:              string[]
+}> {
+  const supabase = createServiceSupabaseClient()
+  const client   = new EvolutionAPIClient(instance)
+
+  // Cargar TODAS las conversaciones de esta instancia (paginado para superar el cap de 1000)
+  type Row = { id: string; remote_jid: string; client_name: string | null }
+  const convs: Row[] = []
+  const PAGE = 1000
+  let from = 0
+  while (true) {
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('id, remote_jid, client_name')
+      .eq('instance_id', instance.id)
+      .neq('status', 'historico')
+      .not('remote_jid', 'is', null)
+      .not('remote_jid', 'ilike', '%@g.us')
+      .not('remote_jid', 'ilike', '%@lid')
+      .range(from, from + PAGE - 1)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    convs.push(...(data as Row[]))
+    if (data.length < PAGE) break
+    from += PAGE
+  }
+
+  console.log(`[Backfill] ${instance.instance_name}: ${convs.length} conversaciones a revisar`)
+
+  let conversationsUpdated = 0
+  let messagesInserted     = 0
+  let errors               = 0
+  const errorLog: string[] = []
+
+  for (const conv of convs) {
+    try {
+      const msgs = await client.getMessages(conv.remote_jid, messagesPerChat)
+
+      // Construir payloads válidos en una sola pasada
+      const payloads: Array<{
+        conversation_id: string
+        external_id:     string
+        content:         string
+        type:            'text' | 'image' | 'audio' | 'document'
+        from_me:         boolean
+        msg_timestamp:   string
+        media_url:       string | null
+      }> = []
+      let maxTs = 0
+
+      for (const msg of msgs) {
+        try {
+          const content = extractMessageContent(msg)
+          if (!content) continue
+          if (!msg?.key?.id) continue   // sin ID externo no podemos dedup
+          const ts = (msg.messageTimestamp ?? 0) * 1000
+          if (ts > maxTs) maxTs = ts
+          payloads.push({
+            conversation_id: conv.id,
+            external_id:     msg.key.id,
+            content,
+            type:            detectMessageType(msg),
+            from_me:         msg.key.fromMe,
+            msg_timestamp:   ts > 0 ? new Date(ts).toISOString() : new Date().toISOString(),
+            media_url:       extractMediaUrl(msg),
+          })
+        } catch {
+          // mensaje con payload raro — saltar este mensaje, seguir con el resto
+        }
+      }
+
+      if (payloads.length > 0) {
+        // Upsert en batch: 1 request a Supabase en vez de N
+        const { error: upsertError } = await supabase
+          .from('messages')
+          .upsert(payloads, { onConflict: 'external_id', ignoreDuplicates: true })
+        if (upsertError) throw upsertError
+        messagesInserted += payloads.length
+      }
+
+      // Actualizar last_message_at con el max real de los mensajes que vinieron
+      if (maxTs > 0) {
+        await supabase
+          .from('conversations')
+          .update({ last_message_at: new Date(maxTs).toISOString() })
+          .eq('id', conv.id)
+        conversationsUpdated++
+      }
+    } catch (e) {
+      const msg = `${conv.remote_jid}: ${e instanceof Error ? e.message : String(e)}`
+      console.error(`[Backfill] ${instance.instance_name}: ${msg}`)
+      if (errorLog.length < 100) errorLog.push(msg)
+      errors++
+    }
+  }
+
+  await supabase
+    .from('whatsapp_instances')
+    .update({ last_sync_at: new Date().toISOString() })
+    .eq('id', instance.id)
+
+  console.log(`[Backfill] ${instance.instance_name}: ${conversationsUpdated}/${convs.length} updated, ${messagesInserted} msgs presentados, ${errors} errores`)
+
+  return {
+    conversationsTried:   convs.length,
+    conversationsUpdated,
+    messagesInserted,
+    errors,
+    errorLog,
+  }
+}
+
 // ── Helpers para procesar mensajes ────────────────────────────────────────────
+// Tolerantes a `message` null/undefined: WhatsApp manda eventos protocolares
+// (encryption updates, reactions, etc.) con message=null que igual aparecen
+// en getMessages. Los descartamos devolviendo '' / 'text' / null.
 export function extractMessageContent(msg: EvolutionMessage): string {
-  const m = msg.message
+  const m = msg?.message
+  if (!m) return ''
   if (m.conversation) return m.conversation
   if (m.imageMessage?.caption) return m.imageMessage.caption
   if (m.imageMessage) return '[Imagen]'
@@ -333,16 +494,20 @@ export function extractMessageContent(msg: EvolutionMessage): string {
 }
 
 export function detectMessageType(msg: EvolutionMessage): 'text' | 'image' | 'audio' | 'document' {
-  if (msg.message.imageMessage) return 'image'
-  if (msg.message.audioMessage) return 'audio'
-  if (msg.message.documentMessage) return 'document'
+  const m = msg?.message
+  if (!m) return 'text'
+  if (m.imageMessage) return 'image'
+  if (m.audioMessage) return 'audio'
+  if (m.documentMessage) return 'document'
   return 'text'
 }
 
 export function extractMediaUrl(msg: EvolutionMessage): string | null {
-  if (msg.message.imageMessage?.url) return msg.message.imageMessage.url
-  if (msg.message.audioMessage?.url) return msg.message.audioMessage.url
-  if (msg.message.documentMessage?.url) return msg.message.documentMessage.url
+  const m = msg?.message
+  if (!m) return null
+  if (m.imageMessage?.url) return m.imageMessage.url
+  if (m.audioMessage?.url) return m.audioMessage.url
+  if (m.documentMessage?.url) return m.documentMessage.url
   return null
 }
 

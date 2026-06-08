@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Upload, FileSpreadsheet, Trash2, CheckCircle, AlertCircle, X, Loader2, Eye, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
+import { Upload, FileSpreadsheet, Trash2, CheckCircle, AlertCircle, X, Loader2, Eye, ChevronLeft, ChevronRight, MessageSquare, Download } from 'lucide-react'
 
 type Batch = {
   batch_id:   string
@@ -141,6 +141,9 @@ function RecordsModal({ batch, onClose }: { batch: Batch; onClose: () => void })
 
 type MatchItem = {
   conversation_id: string
+  instance:        string | null
+  vendedor:        string | null
+  status:          string | null
   phone:           string
   whatsapp_name:   string | null
   cliente:         string | null
@@ -148,6 +151,8 @@ type MatchItem = {
   localidad:       string | null
   tarjetas:        string[]
   observacion:     string | null
+  telefono_1:      string | null
+  telefono_2:      string | null
 }
 
 type MatchResult = {
@@ -172,6 +177,7 @@ export default function BaseClientesPage() {
   const [matchResult, setMatchResult] = useState<MatchResult | null>(null)
   const [matchError, setMatchError] = useState<string | null>(null)
   const [matchSearch, setMatchSearch] = useState('')
+  const [exportingExcel, setExportingExcel] = useState(false)
 
   useEffect(() => { loadBatches() }, [])
 
@@ -231,6 +237,37 @@ export default function BaseClientesPage() {
       else setMatchResult({ matched: data.matched, items: data.items ?? [] })
     } finally {
       setMatching(false)
+    }
+  }
+
+  // Exporta el resultado del match a Excel. Dynamic import para no inflar el bundle
+  // de la página hasta que se necesite.
+  const handleExportExcel = async () => {
+    if (!matchResult || matchResult.items.length === 0) return
+    setExportingExcel(true)
+    try {
+      const XLSX = await import('xlsx')
+      const rows = matchResult.items.map(item => ({
+        'Instancia':         item.instance     ?? '',
+        'Vendedor':          item.vendedor     ?? '',
+        'Status':            item.status       ?? '',
+        'Nombre cliente':    item.whatsapp_name ?? '',
+        'Teléfono':          item.phone,
+        'Localidad':         item.localidad    ?? '',
+        'Cliente (CSV)':     item.cliente      ?? '',
+        'CUIT/DNI':          item.cuit_dni     ?? '',
+        'Teléfono 1':        item.telefono_1   ?? '',
+        'Teléfono 2':        item.telefono_2   ?? '',
+        'Tarjeta':           (item.tarjetas ?? []).join(', '),
+        'Observación':       item.observacion  ?? '',
+      }))
+      const ws = XLSX.utils.json_to_sheet(rows)
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Match')
+      const stamp = new Date().toISOString().slice(0, 10)
+      XLSX.writeFile(wb, `match-conversaciones-${stamp}.xlsx`)
+    } finally {
+      setExportingExcel(false)
     }
   }
 
@@ -327,17 +364,30 @@ export default function BaseClientesPage() {
 
             {matchResult.matched > 0 && (
               <>
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <input
                     type="text"
                     value={matchSearch}
                     onChange={e => setMatchSearch(e.target.value)}
                     placeholder="Filtrar por nombre, DNI, teléfono, tarjeta…"
-                    className="flex-1 max-w-sm border border-border rounded-md px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="flex-1 min-w-50 max-w-sm border border-border rounded-md px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
                   />
-                  <span className="text-xs text-gray-500 shrink-0">
-                    {matchResult.items.length} resultados
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-gray-500">
+                      {matchResult.items.length} resultados
+                    </span>
+                    <button
+                      onClick={handleExportExcel}
+                      disabled={exportingExcel}
+                      title="Descargar resultado del match en Excel"
+                      className="flex items-center gap-1.5 text-xs bg-green-600 hover:bg-green-700 text-white font-medium px-3 py-1.5 rounded-md disabled:opacity-50"
+                    >
+                      {exportingExcel
+                        ? <><Loader2 size={12} className="animate-spin" /> Generando…</>
+                        : <><Download size={12} /> Descargar Excel</>
+                      }
+                    </button>
+                  </div>
                 </div>
 
                 <div className="border border-border rounded-lg overflow-hidden max-h-96 overflow-y-auto">
