@@ -15,7 +15,13 @@ interface ConvListProps {
   selectedIds: Set<string>
   groupsExpanded: boolean
   setGroupsExpanded: (fn: boolean | ((prev: boolean) => boolean)) => void
-  getBaseMatch: (conv: Conversation) => { localidad: string | null; tarjetas: string[] } | null
+  getBaseMatch: (conv: Conversation) => {
+    cliente:     string | null
+    cuit_dni:    string | null
+    localidad:   string | null
+    tarjetas:    string[]
+    observacion: string | null
+  } | null
   handleSaveName: (conversationId: string, displayName: string | null) => Promise<void>
   selectConversation: (conv: Conversation) => void
   toggleSelection: (id: string) => void
@@ -83,8 +89,11 @@ export default function ConvList({
                   onClick={() => selectConversation(conv)}
                   selected={selected?.id === conv.id}
                   onSaveName={handleSaveName}
-                  baseLocalidad={match?.localidad ?? null}
-                  baseTarjetas={match?.tarjetas ?? null}
+                  baseCliente={match?.cliente      ?? null}
+                  baseCuitDni={match?.cuit_dni     ?? null}
+                  baseLocalidad={match?.localidad  ?? null}
+                  baseTarjetas={match?.tarjetas    ?? null}
+                  baseObservacion={match?.observacion ?? null}
                   checkable={selectionMode}
                   checked={selectedIds.has(conv.id)}
                   onCheck={() => toggleSelection(conv.id)}

@@ -44,8 +44,14 @@ interface ConversationCardProps {
   conversation: Conversation
   onClick: () => void
   selected?: boolean
+  // Fallbacks del lookup en memoria (base_clientes), usados cuando los campos
+  // persistidos en la conversación están vacíos. Permite que la UI refleje la
+  // base recién importada sin esperar a un re-match retroactivo.
+  baseCliente?: string | null
+  baseCuitDni?: string | null
   baseLocalidad?: string | null
   baseTarjetas?: string[] | null
+  baseObservacion?: string | null
   onSaveName?: (conversationId: string, displayName: string | null) => Promise<void>
   checkable?: boolean
   checked?: boolean
@@ -57,8 +63,11 @@ export default function ConversationCard({
   conversation,
   onClick,
   selected,
+  baseCliente,
+  baseCuitDni,
   baseLocalidad,
   baseTarjetas,
+  baseObservacion,
   onSaveName,
   checkable,
   checked,
@@ -81,14 +90,20 @@ export default function ConversationCard({
     ? formatDistanceToNow(new Date(conversation.last_message_at))
     : '—'
 
-  // Si la conversación matcheó con la base, el nombre canónico es el del CSV (campo CLIENTE).
-  // Si no hay match, fallback al display_name editable o al client_name de WhatsApp.
-  const displayName = conversation.base_cliente
+  // Prioridad de nombre:
+  //   1. base_cliente persistido en la conversación (de match-retroactive)
+  //   2. baseCliente del lookup en memoria (cubre el caso de base re-importada
+  //      sin re-correr el match — el dato fresco aparece igual)
+  //   3. display_name editable
+  //   4. client_name de WhatsApp
+  //   5. teléfono
+  const resolvedClienteFromBase = conversation.base_cliente ?? baseCliente ?? null
+  const displayName = resolvedClienteFromBase
     ?? conversation.display_name
     ?? conversation.client_name
     ?? conversation.client_phone
   const formattedPhone = formatPhone(conversation.client_phone)
-  const hasCustomName = !!(conversation.base_cliente || conversation.display_name || conversation.client_name)
+  const hasCustomName = !!(resolvedClienteFromBase || conversation.display_name || conversation.client_name)
 
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
@@ -131,12 +146,15 @@ export default function ConversationCard({
   }
 
   // El match con la base puede venir persistido en la conversación, o llegar como
-  // prop (lookup en vivo, base recién importada sin match-retroactive). Usar lo que haya.
-  const resolvedCliente     = conversation.base_cliente
-  const resolvedCuitDni     = conversation.base_cuit_dni
-  const resolvedObservacion = conversation.base_observacion
-  const resolvedLocalidad   = conversation.base_localidad ?? baseLocalidad ?? null
-  const resolvedTarjetas    = (conversation.base_tarjetas ?? baseTarjetas ?? null) as string[] | null
+  // prop (lookup en vivo, base recién importada sin match-retroactive). Resolución
+  // campo por campo: persisted gana, prop completa los huecos.
+  const resolvedCliente     = resolvedClienteFromBase
+  const resolvedCuitDni     = conversation.base_cuit_dni     ?? baseCuitDni     ?? null
+  const resolvedObservacion = conversation.base_observacion  ?? baseObservacion ?? null
+  const resolvedLocalidad   = conversation.base_localidad    ?? baseLocalidad   ?? null
+  const persistedTarjetas   = conversation.base_tarjetas && conversation.base_tarjetas.length > 0
+    ? conversation.base_tarjetas : null
+  const resolvedTarjetas    = (persistedTarjetas ?? baseTarjetas ?? null) as string[] | null
   const tarjetasArr         = Array.isArray(resolvedTarjetas) ? resolvedTarjetas : []
   const primaryTarjeta      = tarjetasArr[0] ?? null
   const extraTarjetas       = Math.max(0, tarjetasArr.length - 1)

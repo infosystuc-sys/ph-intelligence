@@ -419,21 +419,33 @@ export default function ConversationsPage() {
   }
 
   const getBaseMatch = (conv: Conversation) => {
-    // 1) Si la conversación ya tiene los datos persistidos en DB, usar esos.
-    if (conv.base_cliente || conv.base_localidad || (conv.base_tarjetas && conv.base_tarjetas.length > 0)) {
-      return {
-        cliente:     conv.base_cliente     ?? null,
-        cuit_dni:    conv.base_cuit_dni    ?? null,
-        localidad:   conv.base_localidad   ?? null,
-        tarjetas:    conv.base_tarjetas    ?? [],
-        observacion: conv.base_observacion ?? null,
-      }
-    }
-    // 2) Fallback al lookup en memoria (base recién importada, sin match-retroactive todavía).
-    // Match por los últimos 9 dígitos.
+    // Lookup en memoria (siempre): siempre refleja la base_clientes más reciente
+    // importada, sin esperar a que el usuario re-corra match-retroactive.
     const norm = normalizePhone(conv.client_phone)
-    if (norm.length < 9) return null
-    return baseMap[norm.slice(-9)] ?? null
+    const live = norm.length >= 9 ? baseMap[norm.slice(-9)] : null
+
+    const hasPersisted =
+      !!(conv.base_cliente
+        || conv.base_localidad
+        || (conv.base_tarjetas && conv.base_tarjetas.length > 0)
+        || conv.base_cuit_dni
+        || conv.base_observacion)
+
+    if (!hasPersisted && !live) return null
+
+    // Persisted gana campo por campo; los huecos se rellenan con el lookup en memoria.
+    // Esto cubre el caso: re-importé la base con campos nuevos (ej. nombre) y todavía
+    // no corrí el match-retroactive, pero igual quiero ver el dato en la UI.
+    const tarjetasPersisted = conv.base_tarjetas && conv.base_tarjetas.length > 0
+      ? conv.base_tarjetas
+      : null
+    return {
+      cliente:     conv.base_cliente     ?? live?.cliente     ?? null,
+      cuit_dni:    conv.base_cuit_dni    ?? live?.cuit_dni    ?? null,
+      localidad:   conv.base_localidad   ?? live?.localidad   ?? null,
+      tarjetas:    tarjetasPersisted     ?? live?.tarjetas    ?? [],
+      observacion: conv.base_observacion ?? live?.observacion ?? null,
+    }
   }
 
   const individualConvs = conversations.filter(c =>
@@ -502,8 +514,13 @@ export default function ConversationsPage() {
     : null
 
   // Prioridad de nombre: base.cliente (CSV) > display_name (editable) > client_name (WhatsApp) > phone
+  // Prioridad: cliente del match (que ya incluye fallback al lookup en memoria) >
+  // display_name editable > client_name de WhatsApp > teléfono.
   const selectedDisplayName = selected
-    ? (selected.base_cliente ?? selected.display_name ?? selected.client_name ?? selected.client_phone)
+    ? (getBaseMatch(selected)?.cliente
+        ?? selected.display_name
+        ?? selected.client_name
+        ?? selected.client_phone)
     : ''
 
   return (
