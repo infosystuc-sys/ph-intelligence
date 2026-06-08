@@ -594,7 +594,7 @@ export default function ConversationsPage() {
                     active ? 'bg-primary text-white' : 'text-muted hover:bg-bg hover:text-body'
                   }`}
                 >
-                  {inst.instance_name.split(' ')[0]}
+                  {inst.vendedor?.full_name?.split(' ')[0] ?? inst.instance_name.split(' ')[0]}
                   <span className={`ml-1 text-[10px] ${active ? 'opacity-80' : 'text-gray-400'}`}>
                     ({count})
                   </span>
