@@ -25,6 +25,9 @@ export default function ConversationsPage() {
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState(searchParams.get('status') ?? '')
   const [filterStage, setFilterStage] = useState('')
+  // Filtro "cliente esperando +24h" — mismo criterio que la tarjeta del dashboard.
+  // Se activa por query param al hacer click en la tarjeta KPI.
+  const [filterUnresponded, setFilterUnresponded] = useState(searchParams.get('unresponded') === 'true')
   const [selectedInstance, setSelectedInstance] = useState('')
   const [instances, setInstances] = useState<WhatsappInstance[]>([])
   const [hideEmployeePhones, setHideEmployeePhones] = useState(true)
@@ -145,6 +148,7 @@ export default function ConversationsPage() {
               return {
                 ...c,
                 last_message_at: msg.msg_timestamp,
+                last_message_from_me: msg.from_me ?? false,
                 message_count: (c.message_count ?? 0) + 1,
                 last_message: {
                   id: '',
@@ -448,11 +452,24 @@ export default function ConversationsPage() {
     }
   }
 
+  // Réplica EXACTA del criterio "Sin Respuesta +24hs" de /api/kpis:
+  // activa + último mensaje del cliente + >24h + sin @lid + sin empleados.
+  // (No usa el AR_OFFSET_MS de ConversationCard — esa fórmula es legacy y no
+  // coincide con el conteo de la tarjeta del dashboard.)
+  const isUnresponded24h = (c: Conversation) =>
+    c.status === 'active' &&
+    c.last_message_from_me === false &&
+    !c.remote_jid?.endsWith('@lid') &&
+    !employeePhones.has(c.client_phone) &&
+    !!c.last_message_at &&
+    Date.now() - new Date(c.last_message_at).getTime() > 24 * 60 * 60 * 1000
+
   const individualConvs = conversations.filter(c =>
     !isGroup(c) &&
     !(hideEmployeePhones && employeePhones.has(c.client_phone)) &&
     (!selectedInstance || c.instance_id === selectedInstance) &&
     (!filterStatus || c.status === filterStatus) &&
+    (!filterUnresponded || isUnresponded24h(c)) &&
     matchesSearch(c)
   ).filter(c => {
     if (!filterStage) return true
@@ -659,6 +676,20 @@ export default function ConversationsPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Toggle: solo conversaciones con cliente esperando +24h (criterio del dashboard) */}
+            <button
+              onClick={() => setFilterUnresponded(v => !v)}
+              title="Conversaciones activas donde el último mensaje es del cliente y tiene más de 24 horas"
+              className={`flex items-center gap-1 flex-1 px-2 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                filterUnresponded
+                  ? 'bg-amber-100 border-amber-300 text-amber-700'
+                  : 'bg-bg border-border text-gray-500 hover:border-amber-300 hover:text-amber-700'
+              }`}
+            >
+              <Clock size={11} />
+              Sin resp. +24h
+            </button>
+
             {/* Toggle: ocultar teléfonos de empleados */}
             {employeePhones.size > 0 && (
               <button

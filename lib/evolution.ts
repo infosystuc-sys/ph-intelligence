@@ -189,6 +189,7 @@ export class EvolutionAPIClient {
 export async function syncInstanceConversations(
   instance: WhatsappInstance,
   daysBack = 30,
+  opts: { includeLid?: boolean } = {},
 ): Promise<{
   synced: number
   errors: number
@@ -209,14 +210,15 @@ export async function syncInstanceConversations(
   console.log(`[Sync] ${instance.instance_name}: ${allChats.length} chats en Evolution API`)
 
   // Filtrar: solo individuales y con actividad dentro del período.
-  // - @g.us  → grupos
+  // - @g.us  → grupos (siempre se omiten)
   // - @lid   → "Linked IDs" de WhatsApp Communities / usuarios con número oculto.
-  //            NO son conversaciones con clientes, sino identificadores opacos.
+  //            Por default se omiten porque suelen ser ruido, pero opts.includeLid=true
+  //            los incluye (útil para instancias donde clientes usan número privado).
   const chats = allChats.filter(chat => {
     const jid = chat.remoteJid || chat.id
     if (!jid) return false
     if (jid.endsWith('@g.us')) return false
-    if (jid.endsWith('@lid')) return false
+    if (jid.endsWith('@lid') && !opts.includeLid) return false
 
     // Obtener timestamp: messageTimestamp (segundos) o updatedAt (ISO string) como fallback
     const ts = chat.lastMessage?.messageTimestamp

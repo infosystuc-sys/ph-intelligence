@@ -28,6 +28,11 @@ export async function GET(req: NextRequest) {
     // ?all=true → paginar internamente hasta agotar (PostgREST cap-ea .select() a 1000
     // por default; con limit alto en cliente igual venían truncadas)
     const fetchAll = searchParams.get('all') === 'true'
+    // ?includeEmpty=true → incluye conversaciones con 0 mensajes. Default: las excluye.
+    // Las conversaciones vacías típicamente vienen de eventos protocolares de WhatsApp
+    // (rotación de claves, reacciones, read receipts) que N8N upsertea como conversación
+    // pero no producen mensajes guardables → quedan como cards huecas en la UI.
+    const includeEmpty = searchParams.get('includeEmpty') === 'true'
 
     const service = createServiceSupabaseClient()
 
@@ -56,6 +61,10 @@ export async function GET(req: NextRequest) {
       if (status) q = q.eq('status', status)
       else        q = q.neq('status', 'historico')
       if (instanceId) q = q.eq('instance_id', instanceId)
+
+      // Excluir conversaciones vacías por default. El trigger en messages mantiene
+      // message_count sincronizado, así que confiar en esto es seguro.
+      if (!includeEmpty) q = q.gt('message_count', 0)
 
       if (search) {
         q = q.or(

@@ -17,11 +17,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}))
     const instanceId = body?.instanceId as string | undefined
     // daysBack: ventana temporal del backfill. Por default 15. Configurable para
-    // recuperaciones puntuales (ej. corte de un servicio externo).
+    // recuperaciones puntuales (ej. corte de un servicio externo) o para sincronizar
+    // historial completo de instancias nuevas (hasta 730 días = 2 años).
     const rawDaysBack = body?.daysBack
-    const daysBack = typeof rawDaysBack === 'number' && rawDaysBack > 0 && rawDaysBack <= 90
+    const daysBack = typeof rawDaysBack === 'number' && rawDaysBack > 0 && rawDaysBack <= 730
       ? Math.floor(rawDaysBack)
       : 15
+    // includeLid: por default se omiten los @lid (WhatsApp Communities / números ocultos).
+    // Para instancias donde el vendedor recibe clientes con número oculto, activarlo.
+    const includeLid = body?.includeLid === true
 
     const serviceSupabase = createServiceSupabaseClient()
 
@@ -50,7 +54,7 @@ export async function POST(req: NextRequest) {
 
     // Sincronizar en paralelo
     const results = await Promise.allSettled(
-      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance, daysBack))
+      instances.map(inst => syncInstanceConversations(inst as WhatsappInstance, daysBack, { includeLid }))
     )
 
     const totals = results.reduce(
@@ -70,9 +74,10 @@ export async function POST(req: NextRequest) {
     )
 
     return NextResponse.json({
-      message: `Sincronización completada (ventana: ${daysBack} días)`,
+      message: `Sincronización completada (ventana: ${daysBack} días${includeLid ? ', incluyendo @lid' : ''})`,
       instances: instances.length,
       daysBack,
+      includeLid,
       ...totals,
       errorLog: totals.errorLog.slice(0, 100),
     })

@@ -45,14 +45,15 @@ export default function ConvList({
 }: ConvListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
-  // Altura calculada para acomodar el contenido nuevo de cada card:
-  // padding y-3 (24px) + fila 1 con ScoreBadge md a la derecha (~46px)
-  // + fila 2 preview/status (~20px) + fila 3 chips (~22px) + márgenes (~8px) = ~120px
+  // Altura estimada inicial; measureElement mide la real después de renderizar.
+  // Cards con muchos chips wrappean a 2 filas y miden ~140-160px, las simples ~110px.
+  // Sin measureElement se solapaban entre sí.
   const rowVirtualizer = useVirtualizer({
     count: individualConvs.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 120,
     overscan: 8,
+    measureElement: el => el?.getBoundingClientRect().height ?? 120,
   })
 
   if (loading) {
@@ -76,6 +77,7 @@ export default function ConvList({
               <div
                 key={virtualItem.key}
                 data-index={virtualItem.index}
+                ref={rowVirtualizer.measureElement}
                 style={{
                   position: 'absolute',
                   top: 0,

@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import KpiCard from '@/components/ui/KpiCard'
 import ScoreBadge, { getScoreRowClass } from '@/components/ui/ScoreBadge'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import { SkeletonCard, SkeletonTable } from '@/components/ui/LoadingSkeleton'
 import { DashboardStats, User } from '@/types'
+import { createBrowserSupabaseClient } from '@/lib/supabase'
 import {
   Star,
   AlertCircle,
@@ -18,10 +19,8 @@ import {
   WifiOff,
   ChevronUp,
   ChevronDown,
-  Users,
-  MapPin,
-  CheckCircle2,
-  AlertTriangle,
+  CreditCard,
+  MessageSquarePlus,
 } from 'lucide-react'
 
 interface VendorRow {
@@ -33,35 +32,27 @@ interface VendorRow {
   conversations_unresponded_24h: number
   pipeline_majority: string
   trend: number
+  matches_total: number
   whatsapp_instance?: { id: string; status: string }
 }
 
-interface BaseStats {
-  totales: {
-    filas_csv:            number
-    clientes_unicos:      number
-    localidades:          number
-    vendedores_total:     number
-    vendedores_con_base:  number
-    cobertura_global_pct: number
-    clientes_asignados:   number
-    clientes_contactados: number
-  }
-  por_vendedor: Array<{
-    vendedor_id:          string
-    full_name:            string
-    localidad:            string | null
-    clientes_asignados:   number
-    clientes_contactados: number
-    clientes_pendientes:  number
-    cobertura_pct:        number
-    matched_localidad:    boolean
-  }>
-  localidades_sin_vendedor: Array<{ localidad: string; clientes_unicos: number }>
+type SortKey = 'full_name' | 'avg_quality_score' | 'conversations_total' | 'conversations_unresponded_24h' | 'matches_total'
+type SortDir = 'asc' | 'desc'
+
+interface InitiatedRow {
+  vendedor_id:   string
+  vendedor_name: string
+  initiated:     number
+  responded:     number
 }
 
-type SortKey = 'full_name' | 'avg_quality_score' | 'conversations_total' | 'conversations_unresponded_24h'
-type SortDir = 'asc' | 'desc'
+// La métrica de iniciadas existe desde esta fecha (acordado 11/6/2026)
+const INITIATED_MIN_DATE = '2026-06-01'
+
+// Día actual en Argentina como YYYY-MM-DD — los buckets diarios usan ese huso
+function todayAR(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' })
+}
 
 const stageLabel: Record<string, string> = {
   new: 'Nuevo',
@@ -75,15 +66,73 @@ export default function DashboardPage() {
   const router = useRouter()
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [vendors, setVendors] = useState<VendorRow[]>([])
-  const [baseStats, setBaseStats] = useState<BaseStats | null>(null)
-  const [baseStatsError, setBaseStatsError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshingStatus, setRefreshingStatus] = useState(false)
   const [sortKey, setSortKey] = useState<SortKey>('avg_quality_score')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
+  // Conversaciones iniciadas por vendedor (día seleccionado, en vivo)
+  const [initDay, setInitDay] = useState(todayAR())
+  const [initRows, setInitRows] = useState<InitiatedRow[]>([])
+  const [initLoading, setInitLoading] = useState(true)
+  const [initError, setInitError] = useState<string | null>(null)
+  const initDayRef = useRef(initDay)
+  initDayRef.current = initDay
+
   useEffect(() => {
     loadDashboard()
+  }, [])
+
+  const loadInitiatedStats = async (day: string, silent = false) => {
+    if (!silent) setInitLoading(true)
+    try {
+      const res = await fetch(`/api/dashboard/vendor-initiated?from=${day}&to=${day}`)
+      const data = await res.json()
+      if (!res.ok || data?.error) {
+        setInitError(data?.error ?? `HTTP ${res.status}`)
+        setInitRows([])
+      } else {
+        setInitError(null)
+        setInitRows((data.rows ?? []) as InitiatedRow[])
+      }
+    } catch (e) {
+      setInitError(e instanceof Error ? e.message : 'Error de conexión')
+    } finally {
+      if (!silent) setInitLoading(false)
+    }
+  }
+
+  // Carga inicial + recarga al cambiar el día seleccionado
+  useEffect(() => {
+    loadInitiatedStats(initDay)
+  }, [initDay])
+
+  // Tiempo real: cada INSERT en messages refresca los números (debounce 3s para
+  // no spamear con ráfagas). Fallback: refresco cada 60s por si Realtime se cae.
+  useEffect(() => {
+    const supabase = createBrowserSupabaseClient()
+    let debounce: ReturnType<typeof setTimeout> | null = null
+
+    const channel = supabase
+      .channel('dashboard-initiated-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, () => {
+        // Solo refrescar si estamos mirando el día de hoy — los días pasados no cambian
+        if (initDayRef.current !== todayAR()) return
+        if (debounce) clearTimeout(debounce)
+        debounce = setTimeout(() => loadInitiatedStats(initDayRef.current, true), 3000)
+      })
+      .subscribe()
+
+    const interval = setInterval(() => {
+      if (initDayRef.current === todayAR()) loadInitiatedStats(initDayRef.current, true)
+    }, 60_000)
+
+    return () => {
+      supabase.removeChannel(channel)
+      clearInterval(interval)
+      if (debounce) clearTimeout(debounce)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const loadDashboard = async () => {
@@ -99,21 +148,18 @@ export default function DashboardPage() {
 
       setStats(kpisData)
 
-      // Base-clientes stats — exponer error en pantalla si falla (no romper el dashboard)
+      // Matches por vendedor desde el endpoint de base-clientes (sin filtrar por localidad).
+      // Si falla, sigue todo OK con matches_total en 0.
+      const matchesByVendor: Record<string, number> = {}
       try {
         const baseData = await baseRes.json()
-        if (!baseRes.ok || baseData?.error) {
-          const msg = baseData?.error ?? `HTTP ${baseRes.status}`
-          console.error('[base-clientes/stats] error:', msg, baseData)
-          setBaseStatsError(msg)
-        } else {
-          setBaseStats(baseData)
-          setBaseStatsError(null)
+        if (baseRes.ok && Array.isArray(baseData?.por_vendedor)) {
+          for (const v of baseData.por_vendedor as Array<{ vendedor_id: string; matches_total?: number }>) {
+            matchesByVendor[v.vendedor_id] = v.matches_total ?? 0
+          }
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : 'Error parseando respuesta'
-        console.error('[base-clientes/stats] excepción:', e)
-        setBaseStatsError(msg)
+        console.error('[base-clientes/stats] error cargando matches por vendedor:', e)
       }
 
       // Construir rows de vendedores cruzando KPIs
@@ -139,6 +185,7 @@ export default function DashboardPage() {
           conversations_unresponded_24h: kpi?.conversations_unresponded_24h ?? 0,
           pipeline_majority: 'new',
           trend,
+          matches_total: matchesByVendor[v.id] ?? 0,
           whatsapp_instance: v.whatsapp_instance ?? undefined,
         }
       })
@@ -257,7 +304,7 @@ export default function DashboardPage() {
             icon={<AlertCircle size={18} />}
             alert={(stats?.unresponded_24h ?? 0) > 0}
             alertLabel="Requiere atención"
-            onClick={() => router.push('/conversations?status=active')}
+            onClick={() => router.push('/conversations?unresponded=true')}
           />
           <KpiCard
             title="Conversiones Estimadas"
@@ -277,160 +324,133 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Base de Clientes — cobertura por vendedor */}
-      {baseStatsError && !baseStats && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 text-sm text-red-700">
-          <div className="font-semibold mb-1">No se pudo cargar estadísticas de Base de Clientes</div>
-          <div className="font-mono text-xs">{baseStatsError}</div>
+      {/* Conversaciones iniciadas por vendedor (día seleccionado, en vivo) */}
+      <div className="bg-surface rounded-lg shadow-sm border border-border overflow-hidden mb-6">
+        <div className="px-5 py-4 border-b border-border flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="font-semibold text-body flex items-center gap-2">
+              <MessageSquarePlus size={16} className="text-primary" />
+              Conversaciones iniciadas por vendedor
+            </h2>
+            <p className="text-xs text-muted mt-0.5">
+              Conversaciones nuevas (o dormidas +10 días) que el vendedor inició en el día,
+              y cuántas recibieron respuesta del cliente ese mismo día.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {initDay === todayAR() && (
+              <span className="flex items-center gap-1.5 text-xs text-green-600 font-medium">
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                En vivo
+              </span>
+            )}
+            <input
+              type="date"
+              value={initDay}
+              min={INITIATED_MIN_DATE}
+              max={todayAR()}
+              onChange={e => { if (e.target.value) setInitDay(e.target.value) }}
+              className="text-sm border border-border rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
         </div>
-      )}
-      {baseStats && (
-        <div className="bg-surface rounded-lg shadow-sm border border-border overflow-hidden mb-6">
-          <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-            <div>
-              <h2 className="font-semibold text-body">Base de Clientes</h2>
-              <p className="text-xs text-muted mt-0.5">
-                Cobertura del CSV asignado a cada vendedor por localidad
-              </p>
-            </div>
-            <button
-              onClick={() => router.push('/base-clientes')}
-              className="text-sm text-primary hover:text-primary-dark font-medium"
-            >
-              Ver base →
-            </button>
-          </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-border">
-            <div className="bg-surface p-4">
-              <div className="flex items-center gap-1.5 text-xs text-muted mb-1">
-                <Users size={12} /> Clientes únicos
-              </div>
-              <div className="text-2xl font-bold text-body">
-                {baseStats.totales.clientes_unicos.toLocaleString('es-AR')}
-              </div>
-              <div className="text-xs text-muted mt-0.5">
-                {baseStats.totales.filas_csv.toLocaleString('es-AR')} filas
-              </div>
-            </div>
-            <div className="bg-surface p-4">
-              <div className="flex items-center gap-1.5 text-xs text-muted mb-1">
-                <MapPin size={12} /> Localidades
-              </div>
-              <div className="text-2xl font-bold text-body">
-                {baseStats.totales.localidades}
-              </div>
-              <div className="text-xs text-muted mt-0.5">
-                {baseStats.totales.vendedores_con_base}/{baseStats.totales.vendedores_total} vendedores con base
-              </div>
-            </div>
-            <div className="bg-surface p-4">
-              <div className="flex items-center gap-1.5 text-xs text-muted mb-1">
-                <CheckCircle2 size={12} /> Contactados
-              </div>
-              <div className="text-2xl font-bold text-green-600">
-                {baseStats.totales.clientes_contactados.toLocaleString('es-AR')}
-              </div>
-              <div className="text-xs text-muted mt-0.5">
-                de {baseStats.totales.clientes_asignados.toLocaleString('es-AR')} asignados
-              </div>
-            </div>
-            <div className="bg-surface p-4">
-              <div className="flex items-center gap-1.5 text-xs text-muted mb-1">
-                <BarChart2 size={12} /> Cobertura global
-              </div>
-              <div className="text-2xl font-bold text-body">
-                {baseStats.totales.cobertura_global_pct}%
-              </div>
-              <div className="w-full bg-gray-100 rounded-full h-1.5 mt-1.5">
-                <div
-                  className="h-1.5 rounded-full bg-green-600"
-                  style={{ width: `${baseStats.totales.cobertura_global_pct}%` }}
-                />
-              </div>
-            </div>
+        {initError ? (
+          <div className="px-5 py-4 text-sm text-red-600 bg-red-50">
+            {initError}
           </div>
+        ) : initLoading ? (
+          <SkeletonTable rows={4} />
+        ) : (() => {
+          // Merge: mostrar TODOS los vendedores del equipo, con 0 si no iniciaron nada
+          const statsById = new Map(initRows.map(r => [r.vendedor_id, r]))
+          const merged = vendors.map(v => {
+            const s = statsById.get(v.id)
+            return {
+              vendedor_id:   v.id,
+              vendedor_name: v.full_name,
+              avatar_url:    v.avatar_url,
+              initiated:     s?.initiated ?? 0,
+              responded:     s?.responded ?? 0,
+            }
+          })
+          // Sumar vendedores que aparecen en stats pero no están en la lista (borde raro)
+          for (const r of initRows) {
+            if (!merged.some(m => m.vendedor_id === r.vendedor_id)) {
+              merged.push({ ...r, avatar_url: null })
+            }
+          }
+          merged.sort((a, b) => b.initiated - a.initiated)
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-bg border-y border-border text-xs font-semibold text-muted uppercase tracking-wide">
-                  <th className="text-left px-4 py-2.5">Vendedor</th>
-                  <th className="text-left px-4 py-2.5">Localidad</th>
-                  <th className="text-right px-4 py-2.5">Asignados</th>
-                  <th className="text-right px-4 py-2.5">Contactados</th>
-                  <th className="text-right px-4 py-2.5">Pendientes</th>
-                  <th className="text-left px-4 py-2.5 w-48">Cobertura</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {baseStats.por_vendedor.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-6 text-center text-muted">Sin datos</td></tr>
-                ) : baseStats.por_vendedor.map(v => (
-                  <tr key={v.vendedor_id} className="hover:bg-bg">
-                    <td className="px-4 py-2.5 font-medium text-body">{v.full_name}</td>
-                    <td className="px-4 py-2.5">
-                      {v.localidad ? (
-                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700">
-                          <MapPin size={10} /> {v.localidad}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-amber-50 text-amber-700">
-                          <AlertTriangle size={10} /> Sin match
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-right text-gray-700">
-                      {v.clientes_asignados.toLocaleString('es-AR')}
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-semibold text-green-700">
-                      {v.clientes_contactados.toLocaleString('es-AR')}
-                    </td>
-                    <td className="px-4 py-2.5 text-right text-gray-600">
-                      {v.clientes_pendientes.toLocaleString('es-AR')}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                          <div
-                            className={`h-1.5 rounded-full ${
-                              v.cobertura_pct >= 50 ? 'bg-green-600'
-                              : v.cobertura_pct >= 20 ? 'bg-yellow-500'
-                              : 'bg-red-400'
-                            }`}
-                            style={{ width: `${v.cobertura_pct}%` }}
-                          />
-                        </div>
-                        <span className="text-xs font-medium text-gray-600 w-9 text-right">
-                          {v.cobertura_pct}%
-                        </span>
-                      </div>
-                    </td>
+          const totInitiated = merged.reduce((s, r) => s + r.initiated, 0)
+          const totResponded = merged.reduce((s, r) => s + r.responded, 0)
+          const pct = (i: number, r: number) => i > 0 ? Math.round((r / i) * 100) : 0
+
+          return (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-bg border-b border-border text-xs font-semibold text-muted uppercase tracking-wide">
+                    <th className="text-left px-4 py-2.5">Vendedor</th>
+                    <th className="text-right px-4 py-2.5">Iniciadas</th>
+                    <th className="text-right px-4 py-2.5">Con respuesta</th>
+                    <th className="text-left px-4 py-2.5 w-44">% Respuesta</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {baseStats.localidades_sin_vendedor.length > 0 && (
-            <div className="px-5 py-3 border-t border-border bg-amber-50/40">
-              <div className="flex items-start gap-2 text-xs text-amber-800">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                <div>
-                  <span className="font-semibold">
-                    {baseStats.localidades_sin_vendedor.length} localidad(es) sin vendedor asignado:
-                  </span>{' '}
-                  {baseStats.localidades_sin_vendedor
-                    .slice(0, 6)
-                    .map(l => `${l.localidad} (${l.clientes_unicos})`)
-                    .join(' · ')}
-                  {baseStats.localidades_sin_vendedor.length > 6 && ' …'}
-                </div>
-              </div>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {merged.length === 0 ? (
+                    <tr><td colSpan={4} className="px-4 py-6 text-center text-muted">Sin datos para este día</td></tr>
+                  ) : merged.map(r => (
+                    <tr key={r.vendedor_id} className="hover:bg-bg">
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <VendorAvatar vendor={{ full_name: r.vendedor_name, avatar_url: r.avatar_url }} size="sm" />
+                          <span className="font-medium text-body">{r.vendedor_name}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-body">
+                        {r.initiated}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-green-700">
+                        {r.responded}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 bg-gray-100 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full ${
+                                pct(r.initiated, r.responded) >= 50 ? 'bg-green-600'
+                                : pct(r.initiated, r.responded) >= 25 ? 'bg-yellow-500'
+                                : 'bg-red-400'
+                              }`}
+                              style={{ width: `${pct(r.initiated, r.responded)}%` }}
+                            />
+                          </div>
+                          <span className="text-xs font-medium text-gray-600 w-9 text-right">
+                            {r.initiated > 0 ? `${pct(r.initiated, r.responded)}%` : '—'}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                {merged.length > 0 && (
+                  <tfoot>
+                    <tr className="bg-bg border-t border-border font-semibold">
+                      <td className="px-4 py-2.5 text-body">Total</td>
+                      <td className="px-4 py-2.5 text-right text-body">{totInitiated}</td>
+                      <td className="px-4 py-2.5 text-right text-green-700">{totResponded}</td>
+                      <td className="px-4 py-2.5 text-xs text-gray-600">
+                        {totInitiated > 0 ? `${pct(totInitiated, totResponded)}%` : '—'}
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
             </div>
-          )}
-        </div>
-      )}
+          )
+        })()}
+      </div>
 
       {/* Tabla de vendedores */}
       <div className="bg-surface rounded-lg shadow-sm border border-border overflow-hidden">
@@ -471,7 +491,11 @@ export default function DashboardPage() {
                       Sin resp. <ArrowUpDown size={12} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3">WhatsApp</th>
+                  <th className="text-left px-4 py-3">
+                    <button onClick={() => handleSort('matches_total')} className="flex items-center gap-1 hover:text-primary">
+                      Matches <ArrowUpDown size={12} />
+                    </button>
+                  </th>
                   <th className="text-left px-4 py-3">Tendencia</th>
                   <th className="text-left px-4 py-3"></th>
                 </tr>
@@ -514,27 +538,10 @@ export default function DashboardPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        {refreshingStatus ? (
-                          <span className="flex items-center gap-1 text-xs text-gray-400">
-                            <span className="w-2 h-2 rounded-full bg-gray-300 animate-pulse shrink-0" />
-                            {vendor.whatsapp_instance?.status === 'connected' ? 'Online' : 'Offline'}
-                          </span>
-                        ) : (
-                          <span className={`flex items-center gap-1 text-xs font-medium ${
-                            vendor.whatsapp_instance?.status === 'connected'
-                              ? 'text-green-600'
-                              : vendor.whatsapp_instance
-                                ? 'text-red-500'
-                                : 'text-gray-400'
-                          }`}>
-                            {vendor.whatsapp_instance?.status === 'connected'
-                              ? <><Wifi size={12} /> Online</>
-                              : vendor.whatsapp_instance
-                                ? <><WifiOff size={12} /> Offline</>
-                                : '—'
-                            }
-                          </span>
-                        )}
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
+                          <CreditCard size={12} />
+                          {vendor.matches_total.toLocaleString('es-AR')}
+                        </span>
                       </td>
                       <td className="px-4 py-3">
                         {vendor.trend > 0 ? (

@@ -287,14 +287,29 @@ export default function ConversationCard({
           {/* Esquina derecha: tiempo + score (o "sin análisis") */}
           <div className="flex flex-col items-end gap-1 shrink-0">
             {(() => {
-              // Última conexión por color:
-              //   amber = sin respuesta hace +24h (prioridad máxima — needsAttention)
-              //   azul  = último mensaje del cliente (esperando respuesta del vendedor)
-              //   gris  = último mensaje propio (vendedor) o sin datos
-              const lastFromClient = conversation.last_message?.from_me === false
-              const cls = needsAttention      ? 'text-amber-500 font-semibold'
-                       : lastFromClient       ? 'text-blue-600 font-semibold'
-                                              : 'text-muted'
+              // Color graduado de la fecha según urgencia, solo cuando el cliente
+              // está esperando respuesta (último mensaje del cliente):
+              //   azul     ≤ 5 min   → recién llegado, sin presión
+              //   amarillo 5-10 min  → conviene responder
+              //   rojo     > 10 min  → urgente, el cliente está esperando
+              //   gris     último del vendedor o sin datos
+              // Lee preferentemente la columna denormalizada (mantenida por trigger).
+              // Cae al last_message del realtime si la columna no estuviera disponible.
+              const lastFromClient =
+                conversation.last_message_from_me === false
+                || (conversation.last_message_from_me === undefined
+                    && conversation.last_message?.from_me === false)
+              const elapsedMin = conversation.last_message_at
+                ? (Date.now() - new Date(conversation.last_message_at).getTime()) / 60_000
+                : null
+
+              let cls = 'text-muted'
+              if (lastFromClient && elapsedMin !== null) {
+                if      (elapsedMin > 10) cls = 'text-red-600 font-semibold'
+                else if (elapsedMin > 5)  cls = 'text-yellow-600 font-semibold'
+                else                       cls = 'text-blue-600 font-semibold'
+              }
+
               return (
                 <span className={`text-sm leading-tight ${cls}`}>
                   {timeAgo}

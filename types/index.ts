@@ -52,6 +52,9 @@ export interface Conversation {
   base_localidad:   string | null
   base_tarjetas:    string[] | null
   base_observacion: string | null
+  // Denormalizado: from_me del mensaje más reciente. Mantenido por trigger.
+  // null cuando la conversación no tiene mensajes aún.
+  last_message_from_me?: boolean | null
   vendedor?: User
   last_message?: Message
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

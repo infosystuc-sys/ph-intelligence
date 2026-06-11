@@ -63,6 +63,7 @@ export default function SettingsPage() {
 
   // Backfill de conversaciones (recuperar desde Evolution con ventana configurable)
   const [backfillDays, setBackfillDays] = useState(13)
+  const [backfillIncludeLid, setBackfillIncludeLid] = useState(false)
   const [backfilling, setBackfilling] = useState(false)
   const [backfillResult, setBackfillResult] = useState<{
     instances: number
@@ -327,7 +328,7 @@ export default function SettingsPage() {
       const res = await fetch('/api/sync/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ daysBack: backfillDays }),
+        body: JSON.stringify({ daysBack: backfillDays, includeLid: backfillIncludeLid }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -1560,11 +1561,11 @@ export default function SettingsPage() {
                 <input
                   type="number"
                   min={1}
-                  max={90}
+                  max={730}
                   value={backfillDays}
                   onChange={e => {
                     const v = parseInt(e.target.value)
-                    if (!isNaN(v) && v >= 1 && v <= 90) setBackfillDays(v)
+                    if (!isNaN(v) && v >= 1 && v <= 730) setBackfillDays(v)
                   }}
                   disabled={backfilling}
                   className="w-28 border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-gray-50"
@@ -1572,8 +1573,24 @@ export default function SettingsPage() {
                 <p className="text-[10px] text-gray-400 mt-0.5">
                   Hoy {new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })} ·
                   Trae chats con actividad desde el {new Date(Date.now() - backfillDays * 24 * 60 * 60 * 1000).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}
+                  {' · '}
+                  Para instancias nuevas, probá <strong>365</strong> (1 año) o <strong>730</strong> (2 años).
                 </p>
               </div>
+
+              <label className="flex items-center gap-2 text-xs text-gray-700 select-none cursor-pointer pb-2">
+                <input
+                  type="checkbox"
+                  checked={backfillIncludeLid}
+                  onChange={e => setBackfillIncludeLid(e.target.checked)}
+                  disabled={backfilling}
+                  className="rounded border-border"
+                />
+                <span>
+                  Incluir <code className="bg-gray-100 px-1 rounded text-[10px]">@lid</code>
+                  <span className="text-gray-400"> (número oculto)</span>
+                </span>
+              </label>
 
               <button
                 onClick={runBackfill}

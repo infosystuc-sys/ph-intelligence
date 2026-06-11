@@ -112,9 +112,11 @@ export async function GET() {
     localidadToClientes.get(locKey)!.add(r.cliente.trim())
   }
 
-  // 5) Por cada conversación con vendedor + base_cliente, registrar el cliente
-  //    como "contactado" por ese vendedor. base_cliente lo setea match-retroactive.
+  // 5) Por cada conversación con vendedor + base_cliente:
+  //    - contactedByVendor: solo cuenta los que están en la localidad asignada
+  //    - matchesByVendor:   cuenta cualquier conversación con match, sin filtrar por localidad
   const contactedByVendor = new Map<string, Set<string>>()
+  const matchesByVendor   = new Map<string, number>()
   for (const c of convs) {
     if (!c.vendedor_id) continue
     if (!c.base_cliente) continue
@@ -122,6 +124,7 @@ export async function GET() {
     if (employeePhoneSet.has(c.client_phone)) continue
     if (!contactedByVendor.has(c.vendedor_id)) contactedByVendor.set(c.vendedor_id, new Set())
     contactedByVendor.get(c.vendedor_id)!.add(c.base_cliente.trim())
+    matchesByVendor.set(c.vendedor_id, (matchesByVendor.get(c.vendedor_id) ?? 0) + 1)
   }
 
   // 6) Stats por vendedor: cruzar vendor.full_name → localidad.
@@ -136,6 +139,7 @@ export async function GET() {
     clientes_pendientes:  number
     cobertura_pct:        number
     matched_localidad:    boolean
+    matches_total:        number   // conversaciones con base_cliente IS NOT NULL, sin filtrar por localidad
   }
   const perVendor: VendorStats[] = (vendors ?? []).map((v: VendorRow) => {
     const key = vendorLocalidadKey(v.full_name)
@@ -159,6 +163,7 @@ export async function GET() {
       clientes_pendientes:  Math.max(0, totalAsignados - contactadosEnSuBase),
       cobertura_pct:        cobertura,
       matched_localidad:    totalAsignados > 0,
+      matches_total:        matchesByVendor.get(v.id) ?? 0,
     }
   }).sort((a, b) => b.clientes_asignados - a.clientes_asignados)
 
