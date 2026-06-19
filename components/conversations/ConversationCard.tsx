@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { Conversation } from '@/types'
 import ScoreBadge from '@/components/ui/ScoreBadge'
 import VendorAvatar from '@/components/ui/VendorAvatar'
@@ -59,7 +59,7 @@ interface ConversationCardProps {
   userRole?: string
 }
 
-export default function ConversationCard({
+function ConversationCard({
   conversation,
   onClick,
   selected,
@@ -76,12 +76,14 @@ export default function ConversationCard({
 }: ConversationCardProps) {
   const isGroup = conversation.remote_jid?.endsWith('@g.us') ?? false
 
-  const analyses = (Array.isArray(conversation.ai_analysis)
-    ? conversation.ai_analysis
-    : conversation.ai_analysis ? [conversation.ai_analysis] : []) as Array<{ id: string; quality_score: number; analyzed_at: string; conversation_stage?: string }>
-  const analysis = analyses.sort((a, b) =>
-    new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime()
-  )[0] ?? null
+  const analysis = useMemo(() => {
+    const analyses = (Array.isArray(conversation.ai_analysis)
+      ? conversation.ai_analysis
+      : conversation.ai_analysis ? [conversation.ai_analysis] : []) as Array<{ id: string; quality_score: number; analyzed_at: string; conversation_stage?: string }>
+    return [...analyses].sort((a, b) =>
+      new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime()
+    )[0] ?? null
+  }, [conversation.ai_analysis])
   const stage = analysis?.conversation_stage
 
   const lastMsg = conversation.last_message?.content ?? '—'
@@ -404,3 +406,5 @@ export default function ConversationCard({
     </div>
   )
 }
+
+export default memo(ConversationCard)

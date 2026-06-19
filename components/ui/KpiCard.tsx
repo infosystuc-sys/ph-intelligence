@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { KpiCardProps } from '@/types'
 import { TrendingUp, TrendingDown, AlertCircle } from 'lucide-react'
 
-export default function KpiCard({ title, value, icon, trend, trendLabel, alert, alertLabel, onClick }: KpiCardProps) {
+function KpiCard({ title, value, icon, trend, trendLabel, alert, alertLabel, onClick }: KpiCardProps) {
   const trendPositive = trend !== undefined && trend > 0
   const trendNegative = trend !== undefined && trend < 0
 
@@ -44,3 +45,5 @@ export default function KpiCard({ title, value, icon, trend, trendLabel, alert, 
     </div>
   )
 }
+
+export default memo(KpiCard)

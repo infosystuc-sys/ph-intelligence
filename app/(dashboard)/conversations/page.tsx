@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import ConvList from '@/components/conversations/ConvList'
 import ChatBubble from '@/components/conversations/ChatBubble'
@@ -23,6 +23,7 @@ export default function ConversationsPage() {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [loadingReport, setLoadingReport] = useState(false)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState(searchParams.get('status') ?? '')
   const [filterStage, setFilterStage] = useState('')
   // Filtro "cliente esperando +24h" — mismo criterio que la tarjeta del dashboard.
@@ -87,6 +88,12 @@ export default function ConversationsPage() {
     loadConversations()
   }, [loadConversations])
 
+  // Debounce de la búsqueda — evita refiltrar la lista completa en cada tecla.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 250)
+    return () => clearTimeout(t)
+  }, [search])
+
   // Cargar rol del usuario una sola vez al montar
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -127,11 +134,12 @@ export default function ConversationsPage() {
       })
   }, [])
 
-  // Suscripción Realtime: actualiza la conversación localmente y re-ordena de inmediato.
-  // No hace un fetch completo para no mostrar "Cargando..." en cada mensaje.
+  // Suscripción Realtime: un solo canal con los 3 listeners (mensajes, análisis IA,
+  // cambios de status). Antes eran 3 canales/websockets independientes — se
+  // consolidan para reducir overhead de conexión, cada handler mantiene su lógica.
   useEffect(() => {
     const channel = supabase
-      .channel('messages-realtime')
+      .channel('conversations-realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
           const msg = payload.new as {
@@ -180,16 +188,8 @@ export default function ConversationsPage() {
           })
         }
       )
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
-  }, [supabase])
-
-  // Realtime: cuando el auto-análisis crea un nuevo registro en ai_analyses,
-  // actualizar el puntaje en la tarjeta y en el header sin esperar el refresco de 5 min.
-  useEffect(() => {
-    const channel = supabase
-      .channel('ai-analyses-realtime')
+      // Cuando el auto-análisis crea un nuevo registro en ai_analyses, actualizar
+      // el puntaje en la tarjeta y en el header sin esperar el refresco de 5 min.
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ai_analyses' },
         (payload) => {
           const a = payload.new as {
@@ -215,16 +215,8 @@ export default function ConversationsPage() {
           })
         }
       )
-      .subscribe()
-
-    return () => { supabase.removeChannel(channel) }
-  }, [supabase])
-
-  // Realtime: cuando una conversación cambia de status (p.ej. el auto-análisis la
-  // mueve a historico), reflejar el cambio inmediatamente sin esperar el refresco de 5 min.
-  useEffect(() => {
-    const channel = supabase
-      .channel('conversations-status-realtime')
+      // Cuando una conversación cambia de status (p.ej. el auto-análisis la mueve
+      // a historico), reflejar el cambio inmediatamente sin esperar el refresco de 5 min.
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' },
         (payload) => {
           const updated = payload.new as { id: string; status: string }
@@ -405,8 +397,8 @@ export default function ConversationsPage() {
   const isGroup = (c: Conversation) => c.remote_jid?.endsWith('@g.us') ?? false
 
   const matchesSearch = (c: Conversation) => {
-    if (!search) return true
-    const q = search.toLowerCase()
+    if (!debouncedSearch) return true
+    const q = debouncedSearch.toLowerCase()
     // Cuando hay debouncedSearch el API ya filtró por nombre/teléfono/cliente.
     const localFields = [
       c.display_name,
@@ -464,7 +456,7 @@ export default function ConversationsPage() {
     !!c.last_message_at &&
     Date.now() - new Date(c.last_message_at).getTime() > 24 * 60 * 60 * 1000
 
-  const individualConvs = conversations.filter(c =>
+  const individualConvs = useMemo(() => conversations.filter(c =>
     !isGroup(c) &&
     !(hideEmployeePhones && employeePhones.has(c.client_phone)) &&
     (!selectedInstance || c.instance_id === selectedInstance) &&
@@ -477,13 +469,13 @@ export default function ConversationsPage() {
     if (!analyses || analyses.length === 0) return false
     const latest = [...analyses].sort((a, b) => new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime())[0]
     return latest.conversation_stage === filterStage
-  })
+  }), [conversations, hideEmployeePhones, employeePhones, selectedInstance, filterStatus, filterUnresponded, filterStage, debouncedSearch])
 
-  const groupConvs = conversations.filter(c =>
+  const groupConvs = useMemo(() => conversations.filter(c =>
     isGroup(c) &&
     (!selectedInstance || c.instance_id === selectedInstance) &&
     matchesSearch(c)
-  )
+  ), [conversations, selectedInstance, debouncedSearch])
 
   const handleAddEmployeePhone = async () => {
     if (!selected) return

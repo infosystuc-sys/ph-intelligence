@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import KpiCard from '@/components/ui/KpiCard'
 import ScoreBadge, { getScoreRowClass } from '@/components/ui/ScoreBadge'
@@ -238,13 +238,13 @@ export default function DashboardPage() {
     }
   }
 
-  const sortedVendors = [...vendors].sort((a, b) => {
+  const sortedVendors = useMemo(() => [...vendors].sort((a, b) => {
     const aVal = a[sortKey]
     const bVal = b[sortKey]
     const dir = sortDir === 'asc' ? 1 : -1
     if (typeof aVal === 'string') return aVal.localeCompare(bVal as string) * dir
     return ((aVal as number) - (bVal as number)) * dir
-  })
+  }), [vendors, sortKey, sortDir])
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -258,6 +258,33 @@ export default function DashboardPage() {
   const scoreDiff = stats
     ? Math.round((stats.avg_quality_score - stats.avg_quality_score_prev) * 10) / 10
     : 0
+
+  // Merge: mostrar TODOS los vendedores del equipo, con 0 si no iniciaron nada
+  const mergedInitiated = useMemo(() => {
+    const statsById = new Map(initRows.map(r => [r.vendedor_id, r]))
+    const merged = vendors.map(v => {
+      const s = statsById.get(v.id)
+      return {
+        vendedor_id:   v.id,
+        vendedor_name: v.full_name,
+        avatar_url:    v.avatar_url,
+        initiated:     s?.initiated ?? 0,
+        responded:     s?.responded ?? 0,
+      }
+    })
+    // Sumar vendedores que aparecen en stats pero no están en la lista (borde raro)
+    for (const r of initRows) {
+      if (!merged.some(m => m.vendedor_id === r.vendedor_id)) {
+        merged.push({ ...r, avatar_url: null })
+      }
+    }
+    merged.sort((a, b) => b.initiated - a.initiated)
+    return merged
+  }, [vendors, initRows])
+
+  const totInitiated = useMemo(() => mergedInitiated.reduce((s, r) => s + r.initiated, 0), [mergedInitiated])
+  const totResponded = useMemo(() => mergedInitiated.reduce((s, r) => s + r.responded, 0), [mergedInitiated])
+  const pct = (i: number, r: number) => i > 0 ? Math.round((r / i) * 100) : 0
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -361,32 +388,7 @@ export default function DashboardPage() {
           </div>
         ) : initLoading ? (
           <SkeletonTable rows={4} />
-        ) : (() => {
-          // Merge: mostrar TODOS los vendedores del equipo, con 0 si no iniciaron nada
-          const statsById = new Map(initRows.map(r => [r.vendedor_id, r]))
-          const merged = vendors.map(v => {
-            const s = statsById.get(v.id)
-            return {
-              vendedor_id:   v.id,
-              vendedor_name: v.full_name,
-              avatar_url:    v.avatar_url,
-              initiated:     s?.initiated ?? 0,
-              responded:     s?.responded ?? 0,
-            }
-          })
-          // Sumar vendedores que aparecen en stats pero no están en la lista (borde raro)
-          for (const r of initRows) {
-            if (!merged.some(m => m.vendedor_id === r.vendedor_id)) {
-              merged.push({ ...r, avatar_url: null })
-            }
-          }
-          merged.sort((a, b) => b.initiated - a.initiated)
-
-          const totInitiated = merged.reduce((s, r) => s + r.initiated, 0)
-          const totResponded = merged.reduce((s, r) => s + r.responded, 0)
-          const pct = (i: number, r: number) => i > 0 ? Math.round((r / i) * 100) : 0
-
-          return (
+        ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -398,9 +400,9 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {merged.length === 0 ? (
+                  {mergedInitiated.length === 0 ? (
                     <tr><td colSpan={4} className="px-4 py-6 text-center text-muted">Sin datos para este día</td></tr>
-                  ) : merged.map(r => (
+                  ) : mergedInitiated.map(r => (
                     <tr key={r.vendedor_id} className="hover:bg-bg">
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
@@ -434,7 +436,7 @@ export default function DashboardPage() {
                     </tr>
                   ))}
                 </tbody>
-                {merged.length > 0 && (
+                {mergedInitiated.length > 0 && (
                   <tfoot>
                     <tr className="bg-bg border-t border-border font-semibold">
                       <td className="px-4 py-2.5 text-body">Total</td>
@@ -448,8 +450,7 @@ export default function DashboardPage() {
                 )}
               </table>
             </div>
-          )
-        })()}
+          )}
       </div>
 
       {/* Tabla de vendedores */}
