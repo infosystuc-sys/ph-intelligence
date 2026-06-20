@@ -109,17 +109,26 @@ export default function ConversationsPage() {
     loadConversations()
   }, [loadConversations, initiatedMode])
 
+  const [initiatedError, setInitiatedError] = useState<string | null>(null)
+
   // Carga la lista exacta de conversaciones detrás del número clickeado en el
   // dashboard (ver app/api/dashboard/vendor-initiated/conversations).
   useEffect(() => {
     if (!initiatedMode) return
     setLoading(true)
+    setInitiatedError(null)
     const params = new URLSearchParams({ day: initiatedMode.day })
     if (initiatedMode.vendorId) params.set('vendedorId', initiatedMode.vendorId)
     if (initiatedMode.responded) params.set('responded', 'true')
     fetch(`/api/dashboard/vendor-initiated/conversations?${params}`)
       .then(r => r.json())
       .then(async d => {
+        if (d.error) {
+          setInitiatedError(d.error)
+          setConversations([])
+          setLoading(false)
+          return
+        }
         const ids = (d.conversationIds ?? []) as string[]
         if (ids.length === 0) {
           setConversations([])
@@ -128,10 +137,17 @@ export default function ConversationsPage() {
         }
         const res = await fetch(`/api/conversations?all=true&ids=${ids.join(',')}`)
         const data = await res.json()
+        if (data.error) {
+          setInitiatedError(data.error)
+          setConversations([])
+          setLoading(false)
+          return
+        }
         setConversations(data.data ?? [])
         setLoading(false)
       })
-      .catch(() => {
+      .catch(e => {
+        setInitiatedError(e instanceof Error ? e.message : 'Error de conexión')
         setConversations([])
         setLoading(false)
       })
@@ -621,17 +637,22 @@ export default function ConversationsPage() {
 
         {/* Banner del modo "iniciadas por vendedor" — vista retrospectiva de un día */}
         {initiatedMode && (
-          <div className="px-3 py-2 border-b border-border bg-primary/5 flex items-center justify-between gap-2 shrink-0">
-            <span className="text-xs text-primary">
-              <strong>{initiatedMode.vendorName}</strong>
-              {' · '}
-              {new Date(initiatedMode.day + 'T12:00:00').toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-              {' · '}
-              {initiatedMode.responded ? 'iniciadas con respuesta' : 'iniciadas'}
-            </span>
-            <button onClick={exitInitiatedMode} className="text-xs text-gray-400 hover:text-body shrink-0 flex items-center gap-0.5">
-              <X size={12} /> Salir
-            </button>
+          <div className={`px-3 py-2 border-b border-border shrink-0 ${initiatedError ? 'bg-red-50' : 'bg-primary/5'}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-xs ${initiatedError ? 'text-red-700' : 'text-primary'}`}>
+                <strong>{initiatedMode.vendorName}</strong>
+                {' · '}
+                {new Date(initiatedMode.day + 'T12:00:00').toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+                {' · '}
+                {initiatedMode.responded ? 'iniciadas con respuesta' : 'iniciadas'}
+              </span>
+              <button onClick={exitInitiatedMode} className="text-xs text-gray-400 hover:text-body shrink-0 flex items-center gap-0.5">
+                <X size={12} /> Salir
+              </button>
+            </div>
+            {initiatedError && (
+              <p className="text-[11px] text-red-600 mt-1 break-words">{initiatedError}</p>
+            )}
           </div>
         )}
 
