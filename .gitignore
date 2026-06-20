@@ -47,3 +47,7 @@ next-env.d.ts
 
 # Carpeta anidada del proyecto (artifact local — copia entera del repo)
 /ph-intelligence/
+
+# Exports con datos reales de clientes — nunca al repo
+*.xlsx
+*.csv

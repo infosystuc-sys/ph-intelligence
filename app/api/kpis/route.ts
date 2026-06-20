@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
+import { looksLikeGreeting } from '@/lib/utils'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 export const dynamic = 'force-dynamic'
@@ -27,7 +28,9 @@ async function fetchAllPaginated<T>(
 // KPIs del dashboard — calculados EN VIVO sobre las conversaciones reales.
 // Definiciones (acordadas 11/6/2026):
 // - Sin Respuesta +24hs: conversaciones ACTIVAS donde el último mensaje es del
-//   CLIENTE y tiene más de 24 horas. Mismo criterio que el chip ámbar de las cards.
+//   CLIENTE, tiene más de 24 horas, Y no parece un simple saludo/cierre
+//   (looksLikeGreeting en lib/utils.ts — actualizado 20/6/2026 para no contar
+//   "gracias, dale" como una consulta sin responder).
 // - Pipeline Activo: conversaciones con status 'active' únicamente.
 // - Score de Calidad: promedio del ÚLTIMO análisis de cada conversación
 //   (re-analizar no duplica), promediado por vendedor y entre vendedores.
@@ -81,11 +84,12 @@ export async function GET() {
       client_phone: string
       last_message_at: string | null
       last_message_from_me: boolean | null
+      last_message_content: string | null
     }
     const allConvs = await fetchAllPaginated<ConvRow>(
       service,
       'conversations',
-      'id, vendedor_id, status, remote_jid, client_phone, last_message_at, last_message_from_me',
+      'id, vendedor_id, status, remote_jid, client_phone, last_message_at, last_message_from_me, last_message_content',
     )
 
     // Filtrado común: grupos, @lid, empleados, vendedor fuera de alcance
@@ -110,11 +114,14 @@ export async function GET() {
       if (!bucket) continue
       if (c.status !== 'active') continue
       bucket.active++
-      // Cliente esperando: último mensaje del cliente, hace más de 24hs
+      // Cliente esperando: último mensaje del cliente, hace más de 24hs, y ese
+      // mensaje no parece un simple saludo/cierre (ver looksLikeGreeting) —
+      // si solo dijo "gracias, dale" no es una consulta sin responder.
       if (
         c.last_message_from_me === false &&
         c.last_message_at &&
-        now - new Date(c.last_message_at).getTime() > H24
+        now - new Date(c.last_message_at).getTime() > H24 &&
+        !looksLikeGreeting(c.last_message_content)
       ) {
         bucket.unresponded++
       }

@@ -78,6 +78,30 @@ export function truncate(str: string, maxLen: number): string {
   return str.length > maxLen ? str.slice(0, maxLen) + '...' : str
 }
 
+// ── Detección de saludo/cierre ────────────────────────────────────────────────
+// Frases típicas de saludo/cierre en WhatsApp argentino. Usado para no contar
+// como "sin respuesta" un mensaje que en realidad no necesita respuesta del
+// vendedor (ver criterio "Sin Respuesta +24hs" en /api/kpis y Conversaciones).
+const GREETING_WORDS = [
+  'hola', 'buenas', 'buen dia', 'buen día', 'buenas tardes', 'buenas noches',
+  'gracias', 'muchas gracias', 'dale', 'ok', 'okay', 'perfecto', 'genial',
+  'listo', 'joya', 'buenísimo', 'buenisimo', 'de nada', 'chau', 'nos vemos',
+  'saludos', 'que tengas buen dia', 'que tengas buen día', '👍', '🙏', '😊',
+]
+
+// Deliberadamente conservador: solo marca como saludo mensajes cortos, sin
+// pregunta, que matchean alguna frase típica. Prioriza no descartar consultas
+// reales por error antes que atrapar todos los saludos posibles.
+export function looksLikeGreeting(content: string | null | undefined): boolean {
+  if (!content) return false
+  const text = content.trim().toLowerCase()
+  if (!text) return false
+  if (text.includes('?')) return false
+  const words = text.split(/\s+/).filter(Boolean)
+  if (words.length > 6) return false
+  return GREETING_WORDS.some(g => text.includes(g))
+}
+
 // ── Normalizar teléfono argentino a 10 dígitos locales ────────────────────────
 export function normalizePhone(raw: string): string {
   let digits = raw.replace(/\D/g, '')

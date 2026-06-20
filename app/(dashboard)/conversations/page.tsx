@@ -8,7 +8,7 @@ import ScoreBadge from '@/components/ui/ScoreBadge'
 import { Conversation, Message } from '@/types'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { Search, Filter, Brain, ExternalLink, RefreshCw, X, Loader2, PhoneOff, Users, ChevronDown, Pencil, Check, ScrollText, CheckCircle, AlertCircle, Clock, Trash2, Archive, CheckSquare } from 'lucide-react'
-import { STAGE_LABELS, formatPhone, normalizePhone } from '@/lib/utils'
+import { STAGE_LABELS, formatPhone, normalizePhone, looksLikeGreeting } from '@/lib/utils'
 import { WhatsappInstance } from '@/types'
 
 export default function ConversationsPage() {
@@ -460,7 +460,8 @@ export default function ConversationsPage() {
   }
 
   // Réplica EXACTA del criterio "Sin Respuesta +24hs" de /api/kpis:
-  // activa + último mensaje del cliente + >24h + sin @lid + sin empleados.
+  // activa + último mensaje del cliente + >24h + sin @lid + sin empleados +
+  // no parece un saludo/cierre (looksLikeGreeting).
   // (No usa el AR_OFFSET_MS de ConversationCard — esa fórmula es legacy y no
   // coincide con el conteo de la tarjeta del dashboard.)
   const isUnresponded24h = (c: Conversation) =>
@@ -469,7 +470,8 @@ export default function ConversationsPage() {
     !c.remote_jid?.endsWith('@lid') &&
     !employeePhones.has(c.client_phone) &&
     !!c.last_message_at &&
-    Date.now() - new Date(c.last_message_at).getTime() > 24 * 60 * 60 * 1000
+    Date.now() - new Date(c.last_message_at).getTime() > 24 * 60 * 60 * 1000 &&
+    !looksLikeGreeting(c.last_message_content)
 
   const individualConvs = useMemo(() => conversations.filter(c =>
     !isGroup(c) &&
