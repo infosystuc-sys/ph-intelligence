@@ -286,6 +286,15 @@ export default function DashboardPage() {
   const totResponded = useMemo(() => mergedInitiated.reduce((s, r) => s + r.responded, 0), [mergedInitiated])
   const pct = (i: number, r: number) => i > 0 ? Math.round((r / i) * 100) : 0
 
+  // Navega a Conversaciones mostrando exactamente las conversaciones detrás de
+  // un número de la tabla de iniciadas (vendedorId null = fila "Total" → todos).
+  const goToInitiated = (vendedorId: string | null, vendedorName: string, responded: boolean) => {
+    const params = new URLSearchParams({ initiatedDay: initDay, initiatedVendorName: vendedorName })
+    if (vendedorId) params.set('initiatedVendor', vendedorId)
+    if (responded) params.set('initiatedResponded', 'true')
+    router.push(`/conversations?${params.toString()}`)
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       {/* Header */}
@@ -411,10 +420,18 @@ export default function DashboardPage() {
                         </div>
                       </td>
                       <td className="px-4 py-2.5 text-right font-semibold text-body">
-                        {r.initiated}
+                        {r.initiated > 0 ? (
+                          <button onClick={() => goToInitiated(r.vendedor_id, r.vendedor_name, false)} className="hover:underline hover:text-primary">
+                            {r.initiated}
+                          </button>
+                        ) : r.initiated}
                       </td>
                       <td className="px-4 py-2.5 text-right font-semibold text-green-700">
-                        {r.responded}
+                        {r.responded > 0 ? (
+                          <button onClick={() => goToInitiated(r.vendedor_id, r.vendedor_name, true)} className="hover:underline">
+                            {r.responded}
+                          </button>
+                        ) : r.responded}
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
@@ -440,8 +457,20 @@ export default function DashboardPage() {
                   <tfoot>
                     <tr className="bg-bg border-t border-border font-semibold">
                       <td className="px-4 py-2.5 text-body">Total</td>
-                      <td className="px-4 py-2.5 text-right text-body">{totInitiated}</td>
-                      <td className="px-4 py-2.5 text-right text-green-700">{totResponded}</td>
+                      <td className="px-4 py-2.5 text-right text-body">
+                        {totInitiated > 0 ? (
+                          <button onClick={() => goToInitiated(null, 'Todos los vendedores', false)} className="hover:underline hover:text-primary">
+                            {totInitiated}
+                          </button>
+                        ) : totInitiated}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-green-700">
+                        {totResponded > 0 ? (
+                          <button onClick={() => goToInitiated(null, 'Todos los vendedores', true)} className="hover:underline">
+                            {totResponded}
+                          </button>
+                        ) : totResponded}
+                      </td>
                       <td className="px-4 py-2.5 text-xs text-gray-600">
                         {totInitiated > 0 ? `${pct(totInitiated, totResponded)}%` : '—'}
                       </td>

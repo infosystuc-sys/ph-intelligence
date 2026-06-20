@@ -33,6 +33,11 @@ export async function GET(req: NextRequest) {
     // (rotación de claves, reacciones, read receipts) que N8N upsertea como conversación
     // pero no producen mensajes guardables → quedan como cards huecas en la UI.
     const includeEmpty = searchParams.get('includeEmpty') === 'true'
+    // ?ids=id1,id2,... → lista explícita (ej. "iniciadas por vendedor el día X" desde
+    // el dashboard). Bypassea la exclusión de histórico por default: es una vista
+    // retrospectiva, una conversación pudo haberse archivado después de ese día.
+    const idsParam = searchParams.get('ids')
+    const idsList = idsParam ? idsParam.split(',').filter(Boolean) : null
 
     const service = createServiceSupabaseClient()
 
@@ -57,9 +62,14 @@ export async function GET(req: NextRequest) {
         q = q.eq('vendedor_id', user.id)
       }
 
-      // Excluir histórico del listado principal; histórico tiene su propia página
-      if (status) q = q.eq('status', status)
-      else        q = q.neq('status', 'historico')
+      if (idsList) {
+        q = q.in('id', idsList)
+      } else if (status) {
+        q = q.eq('status', status)
+      } else {
+        // Excluir histórico del listado principal; histórico tiene su propia página
+        q = q.neq('status', 'historico')
+      }
       if (instanceId) q = q.eq('instance_id', instanceId)
 
       // Excluir conversaciones vacías por default. El trigger en messages mantiene

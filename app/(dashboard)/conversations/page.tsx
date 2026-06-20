@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import ConvList from '@/components/conversations/ConvList'
 import ChatBubble from '@/components/conversations/ChatBubble'
@@ -29,6 +29,26 @@ export default function ConversationsPage() {
   // Filtro "cliente esperando +24h" — mismo criterio que la tarjeta del dashboard.
   // Se activa por query param al hacer click en la tarjeta KPI.
   const [filterUnresponded, setFilterUnresponded] = useState(searchParams.get('unresponded') === 'true')
+  // Modo "iniciadas por vendedor" — activado por click en la tabla del dashboard.
+  // A diferencia de filterUnresponded (propiedad del estado actual), esto es una
+  // vista retrospectiva de un día puntual: reemplaza la carga normal por la lista
+  // exacta de conversation_id que cumplieron el criterio ese día (incluye
+  // históricas a propósito — ver app/api/dashboard/vendor-initiated/conversations).
+  const [initiatedMode, setInitiatedMode] = useState<{
+    day: string
+    vendorId: string | null
+    vendorName: string
+    responded: boolean
+  } | null>(() => {
+    const day = searchParams.get('initiatedDay')
+    if (!day) return null
+    return {
+      day,
+      vendorId: searchParams.get('initiatedVendor'),
+      vendorName: searchParams.get('initiatedVendorName') ?? 'Vendedor',
+      responded: searchParams.get('initiatedResponded') === 'true',
+    }
+  })
   const [selectedInstance, setSelectedInstance] = useState('')
   const [instances, setInstances] = useState<WhatsappInstance[]>([])
   const [hideEmployeePhones, setHideEmployeePhones] = useState(true)
@@ -85,8 +105,48 @@ export default function ConversationsPage() {
   }, [])
 
   useEffect(() => {
+    if (initiatedMode) return // el modo "iniciadas" maneja su propia carga
     loadConversations()
-  }, [loadConversations])
+  }, [loadConversations, initiatedMode])
+
+  // Carga la lista exacta de conversaciones detrás del número clickeado en el
+  // dashboard (ver app/api/dashboard/vendor-initiated/conversations).
+  useEffect(() => {
+    if (!initiatedMode) return
+    setLoading(true)
+    const params = new URLSearchParams({ day: initiatedMode.day })
+    if (initiatedMode.vendorId) params.set('vendedorId', initiatedMode.vendorId)
+    if (initiatedMode.responded) params.set('responded', 'true')
+    fetch(`/api/dashboard/vendor-initiated/conversations?${params}`)
+      .then(r => r.json())
+      .then(async d => {
+        const ids = (d.conversationIds ?? []) as string[]
+        if (ids.length === 0) {
+          setConversations([])
+          setLoading(false)
+          return
+        }
+        const res = await fetch(`/api/conversations?all=true&ids=${ids.join(',')}`)
+        const data = await res.json()
+        setConversations(data.data ?? [])
+        setLoading(false)
+      })
+      .catch(() => {
+        setConversations([])
+        setLoading(false)
+      })
+  }, [initiatedMode])
+
+  // Salir del modo "iniciadas" y volver a la vista normal de Conversaciones.
+  const exitInitiatedMode = () => {
+    setInitiatedMode(null)
+    router.push('/conversations')
+  }
+
+  // Ref para que el handler de Realtime (suscripto una sola vez) lea el valor
+  // más reciente de initiatedMode sin tener que re-suscribirse en cada cambio.
+  const initiatedModeRef = useRef(initiatedMode)
+  initiatedModeRef.current = initiatedMode
 
   // Debounce de la búsqueda — evita refiltrar la lista completa en cada tecla.
   useEffect(() => {
@@ -220,8 +280,9 @@ export default function ConversationsPage() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' },
         (payload) => {
           const updated = payload.new as { id: string; status: string }
-          if (updated.status === 'historico') {
-            // Sacar de la lista activa
+          // En modo "iniciadas" las históricas se muestran a propósito (vista
+          // retrospectiva de ese día) — no sacarlas de la lista si se archivan.
+          if (updated.status === 'historico' && !initiatedModeRef.current) {
             setConversations(prev => prev.filter(c => c.id !== updated.id))
             setSelected(prev => {
               if (prev?.id === updated.id) { setMessages([]); return null }
@@ -246,10 +307,12 @@ export default function ConversationsPage() {
       .catch(() => {}) // silencioso ante cualquier error
   }, [])
 
-  // Refresco silencioso de la lista cada 5 minutos + disparo de auto-análisis
+  // Refresco silencioso de la lista cada 5 minutos + disparo de auto-análisis.
+  // No recargar la lista normal mientras se está en modo "iniciadas" — pisaría
+  // la vista especial con la lista completa de conversaciones activas.
   useEffect(() => {
     const interval = setInterval(() => {
-      loadConversations(true)
+      if (!initiatedModeRef.current) loadConversations(true)
       triggerAutoAnalysis()
     }, 5 * 60 * 1000)
     return () => clearInterval(interval)
@@ -555,6 +618,22 @@ export default function ConversationsPage() {
     <div className="flex h-full">
       {/* Panel izquierdo: lista de conversaciones */}
       <div className="w-[576px] border-r border-border bg-surface flex flex-col shrink-0">
+
+        {/* Banner del modo "iniciadas por vendedor" — vista retrospectiva de un día */}
+        {initiatedMode && (
+          <div className="px-3 py-2 border-b border-border bg-primary/5 flex items-center justify-between gap-2 shrink-0">
+            <span className="text-xs text-primary">
+              <strong>{initiatedMode.vendorName}</strong>
+              {' · '}
+              {new Date(initiatedMode.day + 'T12:00:00').toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+              {' · '}
+              {initiatedMode.responded ? 'iniciadas con respuesta' : 'iniciadas'}
+            </span>
+            <button onClick={exitInitiatedMode} className="text-xs text-gray-400 hover:text-body shrink-0 flex items-center gap-0.5">
+              <X size={12} /> Salir
+            </button>
+          </div>
+        )}
 
         {/* Toolbar de selección múltiple */}
         {selectionMode && (
