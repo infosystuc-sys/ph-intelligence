@@ -235,17 +235,32 @@ export default function ConversationsPage() {
     return () => { supabase.removeChannel(channel) }
   }, [supabase])
 
-  // Análisis automático deshabilitado por el momento.
-  // El toggle en Settings no persistía correctamente, así que se pausa la función
-  // hasta resolver la causa raíz. Solo el análisis manual y por lote siguen activos.
+  // Dispara un análisis automático de 1 conversación pendiente sin bloquear la UI.
+  // Fire-and-forget: no muestra loading ni notificaciones al usuario. Reactivado
+  // 20/6/2026 — usa el proveedor activo (Gemini) y, si la conversación pertenece
+  // a una instancia con su propia gemini_api_key, esa key (ver lib/ai-analyzer.ts).
+  const triggerAutoAnalysis = useCallback(() => {
+    fetch('/api/analyze/auto', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => { if (d.analyzed) console.log('[AutoAnalysis]', d.conversationId) })
+      .catch(() => {}) // silencioso ante cualquier error
+  }, [])
 
-  // Refresco silencioso de la lista cada 5 minutos (sin disparar análisis IA)
+  // Refresco silencioso de la lista cada 5 minutos + disparo de auto-análisis
   useEffect(() => {
     const interval = setInterval(() => {
       loadConversations(true)
+      triggerAutoAnalysis()
     }, 5 * 60 * 1000)
     return () => clearInterval(interval)
-  }, [loadConversations])
+  }, [loadConversations, triggerAutoAnalysis])
+
+  // Primer análisis automático: 20 segundos después del montaje
+  // (deja que la carga inicial termine antes de hacer la llamada al LLM)
+  useEffect(() => {
+    const timer = setTimeout(triggerAutoAnalysis, 20_000)
+    return () => clearTimeout(timer)
+  }, [triggerAutoAnalysis])
 
   const selectConversation = async (conv: Conversation) => {
     setSelected(conv)

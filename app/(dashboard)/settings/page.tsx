@@ -1331,15 +1331,16 @@ export default function SettingsPage() {
             )}
           </div>
 
-          {/* Análisis autónomo: pausado por el momento */}
-          <div className="bg-amber-50 rounded-lg border border-amber-200 p-5">
+          {/* Análisis autónomo: reactivado 20/6/2026 */}
+          <div className="bg-green-50 rounded-lg border border-green-200 p-5">
             <div className="flex items-start gap-2">
-              <AlertCircle size={16} className="text-amber-600 mt-0.5 shrink-0" />
+              <CheckCircle size={16} className="text-green-600 mt-0.5 shrink-0" />
               <div>
-                <h3 className="font-semibold text-amber-900">Análisis automático — Pausado</h3>
-                <p className="text-xs text-amber-800 mt-1">
-                  La función de análisis autónomo en segundo plano está deshabilitada por el momento.
-                  Los análisis manuales individuales y los análisis por lote siguen funcionando normalmente.
+                <h3 className="font-semibold text-green-900">Análisis automático — Activo</h3>
+                <p className="text-xs text-green-800 mt-1">
+                  Se dispara desde el navegador mientras alguien tiene abierta la pantalla de Conversaciones
+                  (a los 20s de cargar y luego cada 5 min). Requiere que al menos una persona del equipo
+                  tenga esa pestaña abierta — no es un proceso que corra en el servidor sin nadie conectado.
                 </p>
               </div>
             </div>
