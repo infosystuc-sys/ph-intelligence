@@ -9,9 +9,9 @@
  *   - excluye grupos (@g.us), linked-ids (@lid) y teléfonos de empleados
  *
  * Para cada conversación trae el contenido real del último mensaje (tabla
- * `messages`, no hay columna de contenido en `conversations`) y los datos
- * del cliente, y marca con un heurístico simple si el último mensaje PARECE
- * un saludo/cierre en vez de una consulta real sin responder.
+ * `messages`) y los datos del cliente, y marca con los heurísticos de
+ * lib/utils.ts si el último mensaje PARECE un saludo/cierre o una
+ * reacción/sticker en vez de una consulta real sin responder.
  *
  * Uso: npx tsx scripts/export-unresponded.ts
  * Requiere: NEXT_PUBLIC_SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en .env.local
@@ -21,6 +21,7 @@ import { createClient } from '@supabase/supabase-js'
 import * as dotenv from 'dotenv'
 import * as XLSX from 'xlsx'
 import * as path from 'path'
+import { looksLikeGreeting, looksLikeReactionOrSticker } from '../lib/utils'
 
 dotenv.config({ path: '.env.local' })
 
@@ -31,26 +32,6 @@ const supabase = createClient(
 )
 
 const H24 = 24 * 60 * 60 * 1000
-
-// Heurístico: frases típicas de saludo/cierre en WhatsApp argentino. Si el último
-// mensaje del cliente es corto y SOLO contiene esto (sin pregunta, sin más texto),
-// probablemente no requiere una respuesta real — es ruido en el conteo de "sin
-// respuesta". Ideas de cómo refinar esto más adelante, ver el mensaje final del script.
-const GREETING_WORDS = [
-  'hola', 'buenas', 'buen dia', 'buen día', 'buenas tardes', 'buenas noches',
-  'gracias', 'muchas gracias', 'dale', 'ok', 'okay', 'perfecto', 'genial',
-  'listo', 'joya', 'buenísimo', 'buenisimo', 'de nada', 'chau', 'nos vemos',
-  'saludos', 'que tengas buen dia', 'que tengas buen día', '👍', '🙏', '😊',
-]
-
-function looksLikeGreeting(content: string): boolean {
-  const text = content.trim().toLowerCase()
-  if (!text) return false
-  if (text.includes('?')) return false // tiene pregunta → no es solo saludo
-  const words = text.split(/\s+/).filter(Boolean)
-  if (words.length > 6) return false // mensaje largo → probablemente sustancial
-  return GREETING_WORDS.some(g => text.includes(g))
-}
 
 type ConvRow = {
   id: string
@@ -136,6 +117,7 @@ async function main() {
         'Localidad': c.base_localidad ?? '',
         'Último mensaje (cliente)': content,
         '¿Parece solo un saludo?': looksLikeGreeting(content) ? 'Sí' : 'No',
+        '¿Es reacción o sticker?': looksLikeReactionOrSticker(content) ? 'Sí' : 'No',
         'Horas sin respuesta': horasSinResp,
         'Última actividad': new Date(c.last_message_at).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' }),
         'Mensajes totales': c.message_count ?? 0,
@@ -151,8 +133,10 @@ async function main() {
   XLSX.writeFile(wb, outPath)
 
   const posiblesSaludos = rows.filter(r => r['¿Parece solo un saludo?'] === 'Sí').length
+  const reaccionesOStickers = rows.filter(r => r['¿Es reacción o sticker?'] === 'Sí').length
+  const ruido = rows.filter(r => r['¿Parece solo un saludo?'] === 'Sí' || r['¿Es reacción o sticker?'] === 'Sí').length
   console.log(`\nListo: ${outPath}`)
-  console.log(`Total: ${rows.length} · Posibles saludos (heurístico): ${posiblesSaludos} · Probablemente reales: ${rows.length - posiblesSaludos}`)
+  console.log(`Total: ${rows.length} · Saludos: ${posiblesSaludos} · Reacciones/stickers: ${reaccionesOStickers} · Ruido total: ${ruido} · Probablemente reales: ${rows.length - ruido}`)
 }
 
 main().catch(err => {

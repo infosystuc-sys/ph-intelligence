@@ -102,6 +102,21 @@ export function looksLikeGreeting(content: string | null | undefined): boolean {
   return GREETING_WORDS.some(g => text.includes(g))
 }
 
+// ── Detección de reacciones y stickers ────────────────────────────────────────
+// N8N guarda eventos protocolares de WhatsApp (reacciones a un mensaje anterior)
+// como placeholders de texto en vez de descartarlos, ej: "[mensaje: reactionMessage]"
+// o "[mensaje: messageContextInfo, reactionMessage]" (verificado contra datos reales
+// el 20/6/2026). Los stickers se guardan como type='image' con content="[sticker]".
+// Ninguno de los dos es una consulta real esperando respuesta del vendedor.
+export function looksLikeReactionOrSticker(content: string | null | undefined): boolean {
+  if (!content) return false
+  const text = content.trim().toLowerCase()
+  if (!text) return false
+  if (text.includes('reactionmessage')) return true
+  if (text === '[sticker]') return true
+  return false
+}
+
 // ── Normalizar teléfono argentino a 10 dígitos locales ────────────────────────
 export function normalizePhone(raw: string): string {
   let digits = raw.replace(/\D/g, '')
