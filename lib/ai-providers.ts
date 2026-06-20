@@ -176,11 +176,15 @@ export async function callAI(params: {
   systemPrompt: string
   userPrompt: string
   maxTokens?: number
+  // Key específica a usar en lugar de la global del proveedor. Por ahora solo
+  // tiene efecto con Gemini (key por instancia de WhatsApp); se ignora para
+  // los demás proveedores.
+  apiKey?: string
 }): Promise<string> {
-  const { provider, systemPrompt, userPrompt, maxTokens = 2048 } = params
+  const { provider, systemPrompt, userPrompt, maxTokens = 2048, apiKey } = params
 
   switch (provider) {
-    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens)
+    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens, apiKey)
     case 'groq':      return callGroq(systemPrompt, userPrompt, maxTokens)
     case 'anthropic': return callAnthropic(systemPrompt, userPrompt, maxTokens)
   }
@@ -209,9 +213,10 @@ async function callAnthropic(
 async function callGemini(
   systemPrompt: string,
   userPrompt: string,
-  maxTokens: number
+  maxTokens: number,
+  apiKey?: string,
 ): Promise<string> {
-  const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! })
+  const client = new GoogleGenAI({ apiKey: apiKey || process.env.GEMINI_API_KEY! })
   return withRetry(async () => {
     const response = await client.models.generateContent({
       model: AI_MODELS.gemini,

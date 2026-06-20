@@ -28,6 +28,9 @@ export interface WhatsappInstance {
   vendedor_id: string
   api_url: string
   api_key: string
+  // Key de Gemini propia de esta instancia (opcional). Si es null, el análisis
+  // IA de sus conversaciones usa la GEMINI_API_KEY global como fallback.
+  gemini_api_key: string | null
   status: InstanceStatus
   phone_number: string | null
   last_sync_at: string | null

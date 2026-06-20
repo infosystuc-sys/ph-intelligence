@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json()
-    const { instance_name, vendedor_id, api_url, api_key, phone_number } = body
+    const { instance_name, vendedor_id, api_url, api_key, gemini_api_key, phone_number } = body
 
     const service = createServiceSupabaseClient()
     const { data, error } = await service
@@ -58,6 +58,7 @@ export async function POST(req: NextRequest) {
         vendedor_id: vendedor_id || null,
         api_url,
         api_key,
+        gemini_api_key: gemini_api_key || null,
         phone_number: phone_number || null,
       })
       .select()

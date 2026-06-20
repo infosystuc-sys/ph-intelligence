@@ -24,7 +24,7 @@ export default function SettingsPage() {
   const [showNewInstance, setShowNewInstance] = useState(false)
   const [newInstance, setNewInstance] = useState({
     instance_name: '', api_url: process.env.NEXT_PUBLIC_EVOLUTION_API_BASE_URL ?? 'https://puntohogar-evolution-api.cuhhss.easypanel.host',
-    api_key: '', phone_number: '', vendedor_id: '',
+    api_key: '', gemini_api_key: '', phone_number: '', vendedor_id: '',
   })
   const [savingInstance, setSavingInstance] = useState(false)
   const [instanceError, setInstanceError] = useState('')
@@ -197,7 +197,7 @@ export default function SettingsPage() {
     if (data.error) {
       setInstanceError(data.error)
     } else {
-      setNewInstance({ instance_name: '', api_url: 'https://puntohogar-evolution-api.cuhhss.easypanel.host', api_key: '', phone_number: '', vendedor_id: '' })
+      setNewInstance({ instance_name: '', api_url: 'https://puntohogar-evolution-api.cuhhss.easypanel.host', api_key: '', gemini_api_key: '', phone_number: '', vendedor_id: '' })
       setShowNewInstance(false)
       setTestResults(prev => { const n = { ...prev }; delete n['__new__']; return n })
       await loadData()
@@ -868,6 +868,22 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Gemini API Key (opcional)</label>
+                  <div className="relative">
+                    <input
+                      type={showApiKeyFor === '__new_gemini__' ? 'text' : 'password'}
+                      placeholder="Vacío = usa la key global de Gemini"
+                      value={newInstance.gemini_api_key}
+                      onChange={e => setNewInstance(p => ({ ...p, gemini_api_key: e.target.value }))}
+                      className="w-full border border-border rounded-md px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary pr-8"
+                    />
+                    <button onClick={() => setShowApiKeyFor(p => p === '__new_gemini__' ? null : '__new_gemini__')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400">
+                      {showApiKeyFor === '__new_gemini__' ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">Key propia para que el análisis IA de esta instancia no comparta cuota con las demás</p>
+                </div>
+                <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Número de teléfono</label>
                   <input
                     type="text"
@@ -987,19 +1003,42 @@ export default function SettingsPage() {
                         </td>
                         <td className="px-4 py-3">
                           {isEditing ? (
-                            <div className="flex items-center gap-1">
-                              <input
-                                type={showApiKeyFor === inst.id ? 'text' : 'password'}
-                                value={editValues.api_key ?? inst.api_key}
-                                onChange={e => setEditValues(p => ({ ...p, api_key: e.target.value }))}
-                                className="border border-border rounded px-2 py-1 text-xs w-36 font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                              />
-                              <button onClick={() => setShowApiKeyFor(p => p === inst.id ? null : inst.id)} className="text-gray-400">
-                                {showApiKeyFor === inst.id ? <EyeOff size={12} /> : <Eye size={12} />}
-                              </button>
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type={showApiKeyFor === inst.id ? 'text' : 'password'}
+                                  value={editValues.api_key ?? inst.api_key}
+                                  onChange={e => setEditValues(p => ({ ...p, api_key: e.target.value }))}
+                                  className="border border-border rounded px-2 py-1 text-xs w-36 font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                                  title="API Key de Evolution (conexión WhatsApp)"
+                                />
+                                <button onClick={() => setShowApiKeyFor(p => p === inst.id ? null : inst.id)} className="text-gray-400">
+                                  {showApiKeyFor === inst.id ? <EyeOff size={12} /> : <Eye size={12} />}
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type={showApiKeyFor === `${inst.id}_gemini` ? 'text' : 'password'}
+                                  placeholder="Gemini key (opcional)"
+                                  value={editValues.gemini_api_key ?? inst.gemini_api_key ?? ''}
+                                  onChange={e => setEditValues(p => ({ ...p, gemini_api_key: e.target.value }))}
+                                  className="border border-border rounded px-2 py-1 text-xs w-36 font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                                  title="API Key de Gemini propia de esta instancia (vacío = usa la global)"
+                                />
+                                <button onClick={() => setShowApiKeyFor(p => p === `${inst.id}_gemini` ? null : `${inst.id}_gemini`)} className="text-gray-400">
+                                  {showApiKeyFor === `${inst.id}_gemini` ? <EyeOff size={12} /> : <Eye size={12} />}
+                                </button>
+                              </div>
                             </div>
                           ) : (
-                            <span className="font-mono text-xs text-gray-400">••••••••••••</span>
+                            <div className="space-y-0.5">
+                              <span className="font-mono text-xs text-gray-400 block">••••••••••••</span>
+                              {inst.gemini_api_key && (
+                                <span className="flex items-center gap-1 text-[10px] text-blue-600" title="Tiene Gemini API Key propia">
+                                  <Brain size={10} /> Gemini propia
+                                </span>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td className="px-4 py-3">
@@ -1094,7 +1133,7 @@ export default function SettingsPage() {
                                   })()}
                                 </div>
                                 <button
-                                  onClick={() => { setEditingInstance(inst.id); setEditValues({ api_key: inst.api_key, phone_number: inst.phone_number ?? '', vendedor_id: inst.vendedor_id ?? '' }) }}
+                                  onClick={() => { setEditingInstance(inst.id); setEditValues({ api_key: inst.api_key, gemini_api_key: inst.gemini_api_key ?? '', phone_number: inst.phone_number ?? '', vendedor_id: inst.vendedor_id ?? '' }) }}
                                   className="text-xs text-gray-500 hover:text-body flex items-center gap-0.5"
                                 >
                                   <Edit2 size={12} /> Editar

@@ -80,7 +80,7 @@ export async function analyzeConversation(
   // 1. Obtener conversación con mensajes
   const { data: conversation, error: convError } = await supabase
     .from('conversations')
-    .select('*, vendedor:users(full_name)')
+    .select('*, vendedor:users(full_name), instance:whatsapp_instances(gemini_api_key)')
     .eq('id', conversationId)
     .single()
 
@@ -166,11 +166,13 @@ Genera el análisis completo en JSON.`
 
   let rawText = ''
   try {
+    const instanceGeminiKey = (conversation.instance as { gemini_api_key: string | null } | null)?.gemini_api_key
     rawText = await callAI({
       provider,
       systemPrompt: SYSTEM_PROMPT,
       userPrompt,
       maxTokens: 2048,
+      apiKey: instanceGeminiKey ?? undefined,
     })
 
     analysisData = parseLLMJSON(rawText) as AIAnalysisResponse
