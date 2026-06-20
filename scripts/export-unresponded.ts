@@ -5,7 +5,8 @@
  * Conversaciones (ver app/api/kpis/route.ts y app/(dashboard)/conversations/page.tsx):
  *   - status = 'active'
  *   - último mensaje es del cliente (last_message_from_me = false)
- *   - han pasado más de 24hs desde ese mensaje
+ *   - CRUZÓ el umbral de 24hs sin respuesta HOY (no el backlog de días
+ *     anteriores — ver crossed24hThresholdToday en lib/utils.ts)
  *   - excluye grupos (@g.us), linked-ids (@lid) y teléfonos de empleados
  *
  * Para cada conversación trae el contenido real del último mensaje (tabla
@@ -21,7 +22,7 @@ import { createClient } from '@supabase/supabase-js'
 import * as dotenv from 'dotenv'
 import * as XLSX from 'xlsx'
 import * as path from 'path'
-import { looksLikeGreeting, looksLikeReactionOrSticker } from '../lib/utils'
+import { looksLikeGreeting, looksLikeReactionOrSticker, crossed24hThresholdToday } from '../lib/utils'
 
 dotenv.config({ path: '.env.local' })
 
@@ -30,8 +31,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { autoRefreshToken: false, persistSession: false } },
 )
-
-const H24 = 24 * 60 * 60 * 1000
 
 type ConvRow = {
   id: string
@@ -81,10 +80,10 @@ async function main() {
     if (c.remote_jid?.endsWith('@g.us')) return false
     if (c.remote_jid?.endsWith('@lid')) return false
     if (employeePhoneSet.has(c.client_phone)) return false
-    return now - new Date(c.last_message_at).getTime() > H24
+    return crossed24hThresholdToday(c.last_message_at, now)
   })
 
-  console.log(`${unresponded.length} conversaciones sin respuesta +24hs. Buscando el último mensaje de cada una...`)
+  console.log(`${unresponded.length} conversaciones cruzaron el umbral de 24hs sin respuesta HOY. Buscando el último mensaje de cada una...`)
 
   // Una query por conversación (orden + limit 1) — con concurrencia limitada
   // para no saturar la API de Supabase.

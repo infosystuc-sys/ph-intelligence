@@ -117,6 +117,23 @@ export function looksLikeReactionOrSticker(content: string | null | undefined): 
   return false
 }
 
+// ── "Sin Respuesta +24hs": solo lo que cruzó el umbral HOY ────────────────────
+// Antes el criterio era simplemente "> 24hs sin respuesta", que iba acumulando
+// para siempre cualquier conversación vieja sin resolver (un mensaje de hace
+// 10 días sigue contando todos los días). Acordado 20/6/2026: mostrar solo las
+// conversaciones cuyo momento de "cumplir 24hs sin respuesta" cayó HOY — el
+// backlog de conversaciones más viejas no vuelve a aparecer día tras día.
+function toDateKeyAR(ms: number): string {
+  return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' })
+}
+
+export function crossed24hThresholdToday(lastMessageAt: string, now: number = Date.now()): boolean {
+  const H24 = 24 * 60 * 60 * 1000
+  const crossesAt = new Date(lastMessageAt).getTime() + H24
+  if (crossesAt > now) return false // todavía no llegó a las 24hs
+  return toDateKeyAR(crossesAt) === toDateKeyAR(now)
+}
+
 // ── Normalizar teléfono argentino a 10 dígitos locales ────────────────────────
 export function normalizePhone(raw: string): string {
   let digits = raw.replace(/\D/g, '')

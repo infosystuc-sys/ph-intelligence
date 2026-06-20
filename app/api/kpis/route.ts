@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
-import { looksLikeGreeting, looksLikeReactionOrSticker } from '@/lib/utils'
+import { looksLikeGreeting, looksLikeReactionOrSticker, crossed24hThresholdToday } from '@/lib/utils'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 export const dynamic = 'force-dynamic'
@@ -28,9 +28,10 @@ async function fetchAllPaginated<T>(
 // KPIs del dashboard — calculados EN VIVO sobre las conversaciones reales.
 // Definiciones (acordadas 11/6/2026):
 // - Sin Respuesta +24hs: conversaciones ACTIVAS donde el último mensaje es del
-//   CLIENTE, tiene más de 24 horas, Y no parece un simple saludo/cierre ni una
-//   reacción/sticker (looksLikeGreeting / looksLikeReactionOrSticker en
-//   lib/utils.ts — actualizado 20/6/2026).
+//   CLIENTE, CRUZÓ el umbral de 24hs sin respuesta HOY (no el backlog de días
+//   anteriores — ver crossed24hThresholdToday en lib/utils.ts), Y no parece un
+//   simple saludo/cierre ni una reacción/sticker (looksLikeGreeting /
+//   looksLikeReactionOrSticker — actualizado 20/6/2026).
 // - Pipeline Activo: conversaciones con status 'active' únicamente.
 // - Score de Calidad: promedio del ÚLTIMO análisis de cada conversación
 //   (re-analizar no duplica), promediado por vendedor y entre vendedores.
@@ -103,7 +104,6 @@ export async function GET() {
     const convById = new Map(convs.map(c => [c.id, c]))
 
     const now = Date.now()
-    const H24 = 24 * 60 * 60 * 1000
 
     // ── Conteos live por vendedor ─────────────────────────────────────────────
     const liveByVendor: Record<string, { active: number; unresponded: number }> = {}
@@ -114,13 +114,14 @@ export async function GET() {
       if (!bucket) continue
       if (c.status !== 'active') continue
       bucket.active++
-      // Cliente esperando: último mensaje del cliente, hace más de 24hs, y ese
+      // Cliente esperando: último mensaje del cliente, cruzó las 24hs sin
+      // respuesta HOY (no el backlog acumulado de días anteriores), y ese
       // mensaje no parece un simple saludo/cierre ni una reacción/sticker —
       // "gracias, dale" o un 👍 a un mensaje anterior no son consultas sin responder.
       if (
         c.last_message_from_me === false &&
         c.last_message_at &&
-        now - new Date(c.last_message_at).getTime() > H24 &&
+        crossed24hThresholdToday(c.last_message_at, now) &&
         !looksLikeGreeting(c.last_message_content) &&
         !looksLikeReactionOrSticker(c.last_message_content)
       ) {
