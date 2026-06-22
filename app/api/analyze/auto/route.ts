@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { analyzeConversation } from '@/lib/ai-analyzer'
+import { isWithinAutoAnalysisWindow } from '@/lib/utils'
 
 const MIN_MESSAGES        = 5
 const MAX_DAYS_INACTIVE   = 7
@@ -15,8 +16,12 @@ export async function POST() {
       return NextResponse.json({ analyzed: false, reason: 'No autorizado' }, { status: 401 })
     }
 
-    const service = createServiceSupabaseClient()
     const now = new Date()
+    if (!isWithinAutoAnalysisWindow(now)) {
+      return NextResponse.json({ analyzed: false, reason: 'Fuera de horario (21:00–09:00)' })
+    }
+
+    const service = createServiceSupabaseClient()
     const twoHoursAgo      = new Date(now.getTime() - COOLDOWN_AUTO_HOURS * 60 * 60 * 1000).toISOString()
     const sevenDaysAgo     = new Date(now.getTime() - MAX_DAYS_INACTIVE * 24 * 60 * 60 * 1000).toISOString()
     const thirtyMinutesAgo = new Date(now.getTime() - COOLDOWN_MIN_MINUTES * 60 * 1000).toISOString()

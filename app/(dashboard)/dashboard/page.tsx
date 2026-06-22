@@ -8,6 +8,7 @@ import VendorAvatar from '@/components/ui/VendorAvatar'
 import { SkeletonCard, SkeletonTable } from '@/components/ui/LoadingSkeleton'
 import { DashboardStats, User } from '@/types'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
+import { useAutoAnalysis } from '@/lib/useAutoAnalysis'
 import {
   Star,
   AlertCircle,
@@ -82,6 +83,10 @@ export default function DashboardPage() {
   useEffect(() => {
     loadDashboard()
   }, [])
+
+  // Mantiene viva la misma cadencia de análisis automático que /conversations
+  // mientras esta pestaña esté abierta (ver lib/useAutoAnalysis.ts).
+  useAutoAnalysis()
 
   const loadInitiatedStats = async (day: string, silent = false) => {
     if (!silent) setInitLoading(true)

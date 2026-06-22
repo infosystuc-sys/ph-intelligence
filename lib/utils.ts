@@ -134,6 +134,19 @@ export function crossed24hThresholdToday(lastMessageAt: string, now: number = Da
   return toDateKeyAR(crossesAt) === toDateKeyAR(now)
 }
 
+// ── Ventana horaria del análisis automático: 21:00 a 09:00 (hora AR) ─────────
+// Acordado 22/6/2026: el análisis automático no debe correr durante el horario
+// laboral, solo de noche. hourCycle:'h23' evita el bug conocido de Intl que
+// devuelve "24" en vez de "00" a la medianoche con hour12:false.
+export function isWithinAutoAnalysisWindow(now: Date = new Date()): boolean {
+  const hour = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    hour: 'numeric',
+    hourCycle: 'h23',
+  }).format(now))
+  return hour >= 21 || hour < 9
+}
+
 // ── Normalizar teléfono argentino a 10 dígitos locales ────────────────────────
 export function normalizePhone(raw: string): string {
   let digits = raw.replace(/\D/g, '')
