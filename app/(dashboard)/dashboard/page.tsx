@@ -33,7 +33,7 @@ interface VendorRow {
   pipeline_majority: string
   trend: number
   matches_total: number
-  whatsapp_instance?: { id: string; status: string }
+  whatsapp_instance?: { id: string; status: string; phone_number?: string | null }
 }
 
 type SortKey = 'full_name' | 'avg_quality_score' | 'conversations_total' | 'conversations_unresponded_24h' | 'matches_total'
@@ -168,7 +168,7 @@ export default function DashboardPage() {
         kpisByVendor[k.vendedor_id] = k
       })
 
-      const rows: VendorRow[] = (vendorsData.data ?? []).map((v: User & { whatsapp_instance?: { id: string; status: string }, daily_kpis?: { avg_quality_score: number; conversations_total: number; conversations_unresponded_24h: number; date: string }[] }) => {
+      const rows: VendorRow[] = (vendorsData.data ?? []).map((v: User & { whatsapp_instance?: { id: string; status: string; phone_number?: string | null }, daily_kpis?: { avg_quality_score: number; conversations_total: number; conversations_unresponded_24h: number; date: string }[] }) => {
         const kpi = kpisByVendor[v.id]
         const recentKpis = (v.daily_kpis ?? []).sort((a, b) => b.date.localeCompare(a.date))
         const prevKpi = recentKpis[1]
@@ -268,6 +268,7 @@ export default function DashboardPage() {
         vendedor_id:   v.id,
         vendedor_name: v.full_name,
         avatar_url:    v.avatar_url,
+        phone_number:  v.whatsapp_instance?.phone_number ?? null,
         initiated:     s?.initiated ?? 0,
         responded:     s?.responded ?? 0,
       }
@@ -275,7 +276,7 @@ export default function DashboardPage() {
     // Sumar vendedores que aparecen en stats pero no están en la lista (borde raro)
     for (const r of initRows) {
       if (!merged.some(m => m.vendedor_id === r.vendedor_id)) {
-        merged.push({ ...r, avatar_url: null })
+        merged.push({ ...r, avatar_url: null, phone_number: null })
       }
     }
     merged.sort((a, b) => b.initiated - a.initiated)
@@ -403,6 +404,7 @@ export default function DashboardPage() {
                 <thead>
                   <tr className="bg-bg border-b border-border text-xs font-semibold text-muted uppercase tracking-wide">
                     <th className="text-left px-4 py-2.5">Vendedor</th>
+                    <th className="text-left px-4 py-2.5">Teléfono</th>
                     <th className="text-right px-4 py-2.5">Iniciadas</th>
                     <th className="text-right px-4 py-2.5">Con respuesta</th>
                     <th className="text-left px-4 py-2.5 w-44">% Respuesta</th>
@@ -410,7 +412,7 @@ export default function DashboardPage() {
                 </thead>
                 <tbody className="divide-y divide-border">
                   {mergedInitiated.length === 0 ? (
-                    <tr><td colSpan={4} className="px-4 py-6 text-center text-muted">Sin datos para este día</td></tr>
+                    <tr><td colSpan={5} className="px-4 py-6 text-center text-muted">Sin datos para este día</td></tr>
                   ) : mergedInitiated.map(r => (
                     <tr key={r.vendedor_id} className="hover:bg-bg">
                       <td className="px-4 py-2.5">
@@ -419,6 +421,7 @@ export default function DashboardPage() {
                           <span className="font-medium text-body">{r.vendedor_name}</span>
                         </div>
                       </td>
+                      <td className="px-4 py-2.5 text-muted">{r.phone_number ?? '—'}</td>
                       <td className="px-4 py-2.5 text-right font-semibold text-body">
                         {r.initiated > 0 ? (
                           <button onClick={() => goToInitiated(r.vendedor_id, r.vendedor_name, false)} className="hover:underline hover:text-primary">
@@ -457,6 +460,7 @@ export default function DashboardPage() {
                   <tfoot>
                     <tr className="bg-bg border-t border-border font-semibold">
                       <td className="px-4 py-2.5 text-body">Total</td>
+                      <td className="px-4 py-2.5" />
                       <td className="px-4 py-2.5 text-right text-body">
                         {totInitiated > 0 ? (
                           <button onClick={() => goToInitiated(null, 'Todos los vendedores', false)} className="hover:underline hover:text-primary">
