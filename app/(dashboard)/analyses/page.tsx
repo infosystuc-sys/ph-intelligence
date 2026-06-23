@@ -62,12 +62,14 @@ export default function AnalysesPage() {
     analyzed: number
     failed: number
     skipped?: number
+    stoppedEarly?: boolean
+    remaining?: number
     message?: string
     results?: BatchResultRow[]
   }
   const [batching,       setBatching]       = useState(false)
   const [batchResult,    setBatchResult]     = useState<BatchResult | null>(null)
-  const [batchLimit,     setBatchLimit]      = useState(10)
+  const [batchLimit,     setBatchLimit]      = useState<number | 'nocturno'>(10)
   const [showFailReport, setShowFailReport]  = useState(false)
 
   // Modo selección para borrado manual
@@ -113,7 +115,9 @@ export default function AnalysesPage() {
     const res  = await fetch('/api/analyze/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ limit: batchLimit }),
+      body: JSON.stringify(
+        batchLimit === 'nocturno' ? { mode: 'nocturno' } : { limit: batchLimit }
+      ),
     })
     const data = await res.json()
     setBatchResult(data)
@@ -181,20 +185,22 @@ export default function AnalysesPage() {
             <div className="flex items-center gap-2 flex-wrap justify-end">
               <select
                 value={batchLimit}
-                onChange={e => setBatchLimit(Number(e.target.value))}
+                onChange={e => setBatchLimit(e.target.value === 'nocturno' ? 'nocturno' : Number(e.target.value))}
                 className="text-xs border border-border rounded-md px-2 py-1.5"
                 disabled={batching}
               >
                 {[5, 10, 15, 30].map(n => <option key={n} value={n}>{n} conversaciones</option>)}
+                <option value="nocturno">Nocturno (todo el backlog)</option>
               </select>
               <button
                 onClick={handleBatch}
                 disabled={batching}
+                title={batchLimit === 'nocturno' ? 'Procesa todas las conversaciones pendientes, priorizando las más antiguas — igual que el análisis automático nocturno' : undefined}
                 className="flex items-center gap-1.5 bg-primary hover:bg-primary-dark text-white text-xs font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
               >
                 {batching
                   ? <><Loader2 size={13} className="animate-spin" /> Analizando…</>
-                  : <><Play size={13} /> Analizar pendientes</>
+                  : <><Play size={13} /> {batchLimit === 'nocturno' ? 'Analizar nocturno' : 'Analizar pendientes'}</>
                 }
               </button>
               <button onClick={() => loadAnalyses(page)} className="text-muted hover:text-body p-1.5">
@@ -286,6 +292,14 @@ export default function AnalysesPage() {
                     <span className="text-gray-400">· {batchResult.skipped} omitidos</span>
                   )}
                 </div>
+
+                {/* Aviso de corte por tiempo en modo nocturno */}
+                {batchResult.stoppedEarly && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                    Se alcanzó el límite de tiempo de la función con {batchResult.remaining} conversación{batchResult.remaining === 1 ? '' : 'es'} todavía pendiente{batchResult.remaining === 1 ? '' : 's'}.
+                    Apretá &quot;Analizar nocturno&quot; de nuevo para seguir con el resto del backlog.
+                  </p>
+                )}
 
                 {/* Detalle de fallidos */}
                 {showFailReport && batchResult.failed > 0 && (

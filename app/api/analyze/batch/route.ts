@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { analyzeConversation } from '@/lib/ai-analyzer'
+import { getNightlyPriorityCandidates } from '@/lib/auto-analysis-candidates'
 
 // Cada análisis individual puede tardar 10-20s con el modelo actual (más si Gemini
 // devuelve 503 "overloaded" y hay que reintentar) y se procesan estrictamente uno
@@ -58,8 +59,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Sin permisos' }, { status: 403 })
     }
 
-    const body = await req.json().catch(() => ({}))
-    const limit    = Math.min(parseInt(body.limit    ?? '10'), 15)
+    const body     = await req.json().catch(() => ({}))
+    const nocturno = body.mode === 'nocturno'
+    const limit    = Math.min(parseInt(body.limit ?? '10'), 15)
     const vendorId = body.vendorId ?? null
     const minHours = parseInt(body.minHours ?? '6')
 
@@ -67,71 +69,99 @@ export async function POST(req: NextRequest) {
     const since        = new Date(Date.now() - minHours * 60 * 60 * 1000).toISOString()
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-    // Conjunto de teléfonos de empleados: excluidos del análisis
-    const { data: empPhones } = await service.from('employee_phones').select('phone')
-    const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+    type PendingRow = { id: string; client_name: string | null; client_phone: string; display_name: string | null }
+    let pending: PendingRow[]
 
-    // Conjunto de conversaciones que YA tienen un análisis en las últimas `minHours` hs.
-    // Estas se excluyen a nivel SQL para no agotar el cap de candidatos con conversaciones
-    // que de todas formas se iban a filtrar (causa del bug "no hay conversaciones para analizar").
-    const { data: recentlyAnalyzed } = await service
-      .from('ai_analyses')
-      .select('conversation_id')
-      .gte('analyzed_at', since)
-    const recentSet = new Set((recentlyAnalyzed ?? []).map(a => a.conversation_id as string))
-    const recentIds = [...recentSet]
+    if (nocturno) {
+      // Modo "nocturno": misma prioridad que el análisis automático real
+      // (más antiguas/nunca analizadas primero), sin tope de cantidad — procesa
+      // todo el backlog disponible hasta que se acabe el tiempo de la función
+      // (ver TIME_BUDGET_MS más abajo) o no queden candidatas.
+      const NOCTURNO_CANDIDATE_CAP = 1000
+      const candidateIds = await getNightlyPriorityCandidates(service, NOCTURNO_CANDIDATE_CAP)
 
-    // Cap generoso: 500 conversaciones es suficiente para cualquier instancia razonable
-    // y evita el problema de que las 30 más recientes ya estén analizadas.
-    const CANDIDATE_CAP = 500
+      if (!candidateIds.length) {
+        return NextResponse.json({
+          analyzed: 0, failed: 0, skipped: 0,
+          message: 'No hay conversaciones pendientes de análisis',
+          results: [],
+        })
+      }
 
-    let query = service
-      .from('conversations')
-      .select(`
-        id, vendedor_id, status, remote_jid, message_count, last_message_at,
-        client_name, client_phone, display_name,
-        ai_analyses:ai_analyses(analyzed_at)
-      `)
-      .eq('status', 'active')
-      .neq('status', 'historico')
-      .not('remote_jid', 'ilike', '%@g.us')
-      .gte('message_count', 5)
-      .gte('last_message_at', sevenDaysAgo)
-      .order('last_message_at', { ascending: false })
-      .limit(CANDIDATE_CAP)
+      const { data: rows } = await service
+        .from('conversations')
+        .select('id, client_name, client_phone, display_name')
+        .in('id', candidateIds)
 
-    if (vendorId) query = query.eq('vendedor_id', vendorId)
-    if (recentIds.length > 0) {
-      // PostgREST acepta la sintaxis `(id1,id2,...)` para `not.in`
-      query = query.not('id', 'in', `(${recentIds.map(id => `"${id}"`).join(',')})`)
+      const rowMap = new Map((rows ?? []).map(r => [r.id, r as PendingRow]))
+      pending = candidateIds.map(id => rowMap.get(id)).filter((r): r is PendingRow => !!r)
+    } else {
+      // Conjunto de teléfonos de empleados: excluidos del análisis
+      const { data: empPhones } = await service.from('employee_phones').select('phone')
+      const employeePhoneSet = new Set((empPhones ?? []).map((p: { phone: string }) => p.phone))
+
+      // Conjunto de conversaciones que YA tienen un análisis en las últimas `minHours` hs.
+      // Estas se excluyen a nivel SQL para no agotar el cap de candidatos con conversaciones
+      // que de todas formas se iban a filtrar (causa del bug "no hay conversaciones para analizar").
+      const { data: recentlyAnalyzed } = await service
+        .from('ai_analyses')
+        .select('conversation_id')
+        .gte('analyzed_at', since)
+      const recentSet = new Set((recentlyAnalyzed ?? []).map(a => a.conversation_id as string))
+      const recentIds = [...recentSet]
+
+      // Cap generoso: 500 conversaciones es suficiente para cualquier instancia razonable
+      // y evita el problema de que las 30 más recientes ya estén analizadas.
+      const CANDIDATE_CAP = 500
+
+      let query = service
+        .from('conversations')
+        .select(`
+          id, vendedor_id, status, remote_jid, message_count, last_message_at,
+          client_name, client_phone, display_name,
+          ai_analyses:ai_analyses(analyzed_at)
+        `)
+        .eq('status', 'active')
+        .neq('status', 'historico')
+        .not('remote_jid', 'ilike', '%@g.us')
+        .gte('message_count', 5)
+        .gte('last_message_at', sevenDaysAgo)
+        .order('last_message_at', { ascending: false })
+        .limit(CANDIDATE_CAP)
+
+      if (vendorId) query = query.eq('vendedor_id', vendorId)
+      if (recentIds.length > 0) {
+        // PostgREST acepta la sintaxis `(id1,id2,...)` para `not.in`
+        query = query.not('id', 'in', `(${recentIds.map(id => `"${id}"`).join(',')})`)
+      }
+
+      const { data: candidates, error } = await query
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+      type CandRow = {
+        id: string
+        vendedor_id: string
+        status: string
+        remote_jid: string | null
+        message_count: number
+        last_message_at: string | null
+        client_name: string | null
+        client_phone: string
+        display_name: string | null
+        ai_analyses: Array<{ analyzed_at: string }>
+      }
+
+      pending = ((candidates ?? []) as CandRow[]).filter(c => {
+        // Exclusiones explícitas — defensa en profundidad además del filtro del query
+        if (c.status === 'historico') return false
+        if (c.remote_jid?.endsWith('@g.us')) return false
+        if (employeePhoneSet.has(c.client_phone)) return false
+        const analyses = c.ai_analyses ?? []
+        if (!analyses.length) return true
+        const latest = analyses.reduce((a, b) => a.analyzed_at > b.analyzed_at ? a : b)
+        return latest.analyzed_at < since
+      }).slice(0, limit)
     }
-
-    const { data: candidates, error } = await query
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-    type CandRow = {
-      id: string
-      vendedor_id: string
-      status: string
-      remote_jid: string | null
-      message_count: number
-      last_message_at: string | null
-      client_name: string | null
-      client_phone: string
-      display_name: string | null
-      ai_analyses: Array<{ analyzed_at: string }>
-    }
-
-    const pending = ((candidates ?? []) as CandRow[]).filter(c => {
-      // Exclusiones explícitas — defensa en profundidad además del filtro del query
-      if (c.status === 'historico') return false
-      if (c.remote_jid?.endsWith('@g.us')) return false
-      if (employeePhoneSet.has(c.client_phone)) return false
-      const analyses = c.ai_analyses ?? []
-      if (!analyses.length) return true
-      const latest = analyses.reduce((a, b) => a.analyzed_at > b.analyzed_at ? a : b)
-      return latest.analyzed_at < since
-    }).slice(0, limit)
 
     if (!pending.length) {
       return NextResponse.json({
@@ -153,9 +183,24 @@ export async function POST(req: NextRequest) {
     const results: ResultRow[] = []
     let extraDelay = 0  // se acumula cuando el servidor está saturado
 
+    // Presupuesto de tiempo para el modo nocturno: con maxDuration=300s, dejamos
+    // margen para que la función corte el loop por sí misma y devuelva una
+    // respuesta prolija en vez de que Vercel mate la ejecución a la mitad de un
+    // análisis. El usuario puede volver a apretar "Nocturno" para seguir con el
+    // resto del backlog (cada llamada vuelve a calcular las candidatas más
+    // antiguas pendientes).
+    const TIME_BUDGET_MS = 270_000
+    const startedAt = Date.now()
+    let stoppedEarly = false
+
     // for...of con await garantiza procesamiento estrictamente secuencial:
     // cada conversación termina por completo antes de iniciar la siguiente petición a la API.
     for (const [i, conv] of pending.entries()) {
+      if (nocturno && Date.now() - startedAt > TIME_BUDGET_MS) {
+        stoppedEarly = true
+        break
+      }
+
       const convName = conv.display_name ?? conv.client_name ?? conv.client_phone
 
       let success    = false
@@ -202,10 +247,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const analyzed = results.filter(r => r.success).length
-    const failed   = results.filter(r => !r.success).length
+    const analyzed  = results.filter(r => r.success).length
+    const failed    = results.filter(r => !r.success).length
+    const remaining = pending.length - results.length
 
-    return NextResponse.json({ analyzed, failed, skipped: pending.length - results.length, results })
+    return NextResponse.json({
+      analyzed, failed, skipped: remaining,
+      stoppedEarly,
+      remaining: nocturno ? remaining : undefined,
+      results,
+    })
   } catch (err) {
     console.error('Error en /api/analyze/batch:', err)
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })
