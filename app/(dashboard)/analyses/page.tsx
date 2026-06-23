@@ -71,6 +71,7 @@ export default function AnalysesPage() {
   const [batchResult,    setBatchResult]     = useState<BatchResult | null>(null)
   const [batchLimit,     setBatchLimit]      = useState<number | 'nocturno'>(10)
   const [showFailReport, setShowFailReport]  = useState(false)
+  const [batchError,     setBatchError]      = useState<string | null>(null)
 
   // Modo selección para borrado manual
   const [selectionMode, setSelectionMode] = useState(false)
@@ -111,18 +112,42 @@ export default function AnalysesPage() {
   const handleBatch = async () => {
     setBatching(true)
     setBatchResult(null)
+    setBatchError(null)
     setShowFailReport(false)
-    const res  = await fetch('/api/analyze/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(
-        batchLimit === 'nocturno' ? { mode: 'nocturno' } : { limit: batchLimit }
-      ),
-    })
-    const data = await res.json()
-    setBatchResult(data)
-    setBatching(false)
-    if (data.analyzed > 0) loadAnalyses(1)
+
+    // El endpoint corta a los 300s (maxDuration de Vercel) — si la conexión no
+    // responde ni un poco más allá de eso, algo se rompió en el camino (function
+    // matada sin devolver respuesta, red caída, etc). Sin este timeout el botón
+    // quedaba "Analizando..." para siempre si el fetch nunca resolvía.
+    const controller = new AbortController()
+    const timeoutId   = setTimeout(() => controller.abort(), 310_000)
+
+    try {
+      const res = await fetch('/api/analyze/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          batchLimit === 'nocturno' ? { mode: 'nocturno' } : { limit: batchLimit }
+        ),
+        signal: controller.signal,
+      })
+      if (!res.ok) {
+        throw new Error(`El servidor respondió con error (${res.status})`)
+      }
+      const data = await res.json()
+      setBatchResult(data)
+      if (data.analyzed > 0) loadAnalyses(1)
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError'
+      setBatchError(
+        aborted
+          ? 'Se agotó el tiempo de espera. El análisis puede haber quedado a mitad de camino en el servidor — revisá la lista antes de reintentar.'
+          : `No se pudo completar el análisis: ${err instanceof Error ? err.message : String(err)}`
+      )
+    } finally {
+      clearTimeout(timeoutId)
+      setBatching(false)
+    }
   }
 
   const toggleSelected = (id: string) => {
@@ -268,6 +293,12 @@ export default function AnalysesPage() {
               <div className="w-full max-w-lg flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2.5">
                 <AlertCircle size={14} className="mt-0.5 shrink-0" />
                 <span className="wrap-break-word text-xs">{deleteError}</span>
+              </div>
+            )}
+            {batchError && (
+              <div className="w-full max-w-lg flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2.5">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span className="wrap-break-word text-xs">{batchError}</span>
               </div>
             )}
 

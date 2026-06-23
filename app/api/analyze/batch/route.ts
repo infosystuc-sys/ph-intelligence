@@ -14,7 +14,6 @@ export const maxDuration = 300
 // ── Configuración de tiempos ──────────────────────────────────────────────────
 const DELAY_BETWEEN_MS   = 6000   // pausa base entre conversaciones
 const RATE_LIMIT_WAIT_MS = 20000  // pausa extra al detectar saturación (se acumula)
-const MAX_ATTEMPTS       = 3      // reintentos por conversación ante error recuperable
 
 // Palabras clave que indican saturación del servidor de IA
 const RATE_LIMIT_KEYS = ['429', '503', '529', 'overloaded', 'rate', 'quota', 'exhausted', 'too many']
@@ -203,30 +202,20 @@ export async function POST(req: NextRequest) {
 
       const convName = conv.display_name ?? conv.client_name ?? conv.client_phone
 
-      let success    = false
-      let analysisId: string | undefined
-      let lastError  = ''
-      let attempts   = 0
+      // Un solo intento por conversación a este nivel: analyzeConversation ya
+      // reintenta internamente ante errores recuperables (ver withRetry en
+      // lib/ai-providers.ts), usando además el retry-after que sugiere la propia
+      // API cuando está disponible. Reintentar otra vez acá arriba multiplicaba
+      // el tiempo de espera (hasta 3×3 intentos) sin ganar resiliencia real, y
+      // dejaba lotes de pocas conversaciones corriendo más de 20 minutos cuando
+      // Gemini está saturado. Si esta falla, queda pendiente para el próximo lote.
+      const result = await analyzeConversation(conv.id, 'manual')
+      const success = result.success
+      const analysisId = result.analysisId
+      const lastError = result.error ?? 'Error desconocido'
 
-      // Hasta MAX_ATTEMPTS intentos por conversación
-      while (attempts < MAX_ATTEMPTS && !success) {
-        if (attempts > 0) {
-          const backoff = RATE_LIMIT_WAIT_MS * attempts
-          console.log(`[Batch] Reintento ${attempts}/${MAX_ATTEMPTS - 1} para ${convName} en ${backoff / 1000}s…`)
-          await delay(backoff)
-        }
-
-        attempts++
-        const result = await analyzeConversation(conv.id, 'manual')
-
-        if (result.success) {
-          success    = true
-          analysisId = result.analysisId
-        } else {
-          lastError = result.error ?? 'Error desconocido'
-          if (!isRateLimit(lastError)) break
-          extraDelay = Math.min(extraDelay + RATE_LIMIT_WAIT_MS, 60000)
-        }
+      if (!success && isRateLimit(lastError)) {
+        extraDelay = Math.min(extraDelay + RATE_LIMIT_WAIT_MS, 60000)
       }
 
       results.push({
@@ -235,7 +224,7 @@ export async function POST(req: NextRequest) {
         success,
         analysisId,
         error: success ? undefined : friendlyError(lastError),
-        attempts,
+        attempts: 1,
       })
 
       // Pausa entre conversaciones — nunca en paralelo
