@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { analyzeConversation } from '@/lib/ai-analyzer'
 
-export const maxDuration = 60
+// Cada análisis individual puede tardar 10-20s con el modelo actual (más si Gemini
+// devuelve 503 "overloaded" y hay que reintentar) y se procesan estrictamente uno
+// por uno con pausas entre medio — 60s alcanzaba para ~2-3 conversaciones como
+// mucho. Confirmado con logs reales (analysis_logs) el 22/6/2026: un lote de 5
+// supera los 60s solo en tiempo base, sin contar reintentos, y Vercel corta la
+// función a mitad de camino.
+export const maxDuration = 300
 
 // ── Configuración de tiempos ──────────────────────────────────────────────────
 const DELAY_BETWEEN_MS   = 6000   // pausa base entre conversaciones
