@@ -3,9 +3,10 @@
 -- click en esos números muestre exactamente esas conversaciones en /conversations.
 --
 -- Reutiliza la MISMA definición de "iniciada"/"respondida" que
--- get_vendor_initiated_stats (ver supabase/fn_vendor_initiated_stats.sql) — se
--- duplican las CTEs en vez de compartirlas para mantener cada función simple e
--- independiente.
+-- get_vendor_initiated_stats (ver supabase/fn_vendor_initiated_stats.sql,
+-- redefinida el 23/6/2026: primer mensaje del día del vendedor, sin exigir
+-- dormancy previa) — se duplican las CTEs en vez de compartirlas para mantener
+-- cada función simple e independiente.
 --
 -- p_vendedor_id NULL → todas las del día (fila "Total" de la tabla).
 -- p_responded_only TRUE → solo las que además recibieron respuesta del cliente
@@ -25,7 +26,7 @@ WITH qualifying AS (
     c.vendedor_id,
     m.conversation_id,
     m.msg_timestamp,
-    (m.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS day_ar
+    (m.msg_timestamp AT TIME ZONE 'UTC')::date AS day_ar
   FROM messages m
   JOIN conversations c ON c.id = m.conversation_id
   WHERE m.from_me = true
@@ -33,15 +34,9 @@ WITH qualifying AS (
     AND (p_vendedor_id IS NULL OR c.vendedor_id = p_vendedor_id)
     AND c.remote_jid NOT LIKE '%@g.us'
     AND c.remote_jid NOT LIKE '%@lid'
-    AND (m.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = p_day
+    AND (m.msg_timestamp AT TIME ZONE 'UTC')::date = p_day
     AND NOT EXISTS (
       SELECT 1 FROM employee_phones ep WHERE ep.phone = c.client_phone
-    )
-    AND NOT EXISTS (
-      SELECT 1 FROM messages prev
-      WHERE prev.conversation_id = m.conversation_id
-        AND prev.msg_timestamp <  m.msg_timestamp
-        AND prev.msg_timestamp >= m.msg_timestamp - interval '10 days'
     )
 ),
 first_per_day AS (
@@ -57,6 +52,6 @@ WHERE NOT p_responded_only OR EXISTS (
   WHERE r.conversation_id = f.conversation_id
     AND r.from_me = false
     AND r.msg_timestamp > f.msg_timestamp
-    AND (r.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = f.day_ar
+    AND (r.msg_timestamp AT TIME ZONE 'UTC')::date = f.day_ar
 );
 $$;

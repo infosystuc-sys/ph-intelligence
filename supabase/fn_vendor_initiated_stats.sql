@@ -1,15 +1,20 @@
 -- Función: estadística de conversaciones INICIADAS por el vendedor por día,
 -- y cuántas recibieron respuesta del cliente EN EL MISMO DÍA.
 --
--- Definiciones (acordadas el 11/6/2026):
--- - "Iniciada": el vendedor (from_me = true) mandó un mensaje y NO existe ningún
---   mensaje previo en esa conversación dentro de los 10 días anteriores.
---   Cubre dos casos: conversación nueva (sin historia) o conversación "dormida"
---   reactivada por el vendedor (último mensaje hace más de 10 días).
+-- Definiciones (acordadas el 11/6/2026, redefinidas el 23/6/2026):
+-- - "Iniciada": el vendedor (from_me = true) mandó el PRIMER mensaje del día
+--   argentino en esa conversación, sin importar la antigüedad/actividad previa
+--   de la conversación. (Antes exigía 10 días sin actividad previa; se quitó esa
+--   restricción porque generaba un número más bajo de lo esperado: conversaciones
+--   activas el día anterior y reabiertas por el vendedor hoy también cuentan.)
 -- - "Respondida": esa conversación iniciada recibió al menos un mensaje del
 --   cliente (from_me = false) posterior al mensaje inicial Y dentro del mismo
 --   día argentino.
--- - Día = fecha en America/Argentina/Buenos_Aires (no UTC).
+-- - Día = fecha en America/Argentina/Buenos_Aires. msg_timestamp se guarda como
+--   timestamptz pero el valor crudo YA es la hora de pared AR (mal etiquetada
+--   como UTC+00:00 por el proceso de ingesta) — por eso la fecha se extrae con
+--   `AT TIME ZONE 'UTC'` (sin corrimiento real) y NO con
+--   `AT TIME ZONE 'America/Argentina/Buenos_Aires'` (que restaría 3hs de más).
 -- - Una conversación cuenta una sola vez por (vendedor, día) aunque el vendedor
 --   haya mandado varios mensajes ese día.
 -- - Exclusiones: grupos (@g.us), linked-ids (@lid), teléfonos de empleados,
@@ -26,26 +31,19 @@ WITH qualifying AS (
     c.vendedor_id,
     m.conversation_id,
     m.msg_timestamp,
-    (m.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS day_ar
+    (m.msg_timestamp AT TIME ZONE 'UTC')::date AS day_ar
   FROM messages m
   JOIN conversations c ON c.id = m.conversation_id
   WHERE m.from_me = true
     AND c.vendedor_id IS NOT NULL
     AND c.remote_jid NOT LIKE '%@g.us'
     AND c.remote_jid NOT LIKE '%@lid'
-    AND (m.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date BETWEEN p_start AND p_end
+    AND (m.msg_timestamp AT TIME ZONE 'UTC')::date BETWEEN p_start AND p_end
     AND NOT EXISTS (
       SELECT 1 FROM employee_phones ep WHERE ep.phone = c.client_phone
     )
-    -- Sin ningún mensaje previo en los últimos 10 días → conversación nueva o dormida
-    AND NOT EXISTS (
-      SELECT 1 FROM messages prev
-      WHERE prev.conversation_id = m.conversation_id
-        AND prev.msg_timestamp <  m.msg_timestamp
-        AND prev.msg_timestamp >= m.msg_timestamp - interval '10 days'
-    )
 ),
--- Colapsar a una fila por (vendedor, conversación, día): el primer inicio del día
+-- Colapsar a una fila por (vendedor, conversación, día): el primer mensaje del día
 first_per_day AS (
   SELECT DISTINCT ON (vendedor_id, conversation_id, day_ar)
     vendedor_id, conversation_id, day_ar, msg_timestamp
@@ -62,7 +60,7 @@ flagged AS (
       WHERE r.conversation_id = f.conversation_id
         AND r.from_me = false
         AND r.msg_timestamp > f.msg_timestamp
-        AND (r.msg_timestamp AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = f.day_ar
+        AND (r.msg_timestamp AT TIME ZONE 'UTC')::date = f.day_ar
     ) AS responded
   FROM first_per_day f
 )
