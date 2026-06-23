@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { Conversation, ConversationStage, User } from '@/types'
 import { STAGE_LABELS, STAGE_COLORS, formatDistanceToNow } from '@/lib/utils'
@@ -22,6 +23,7 @@ function latestAnalysis(conv: ConvWithAnalysis) {
 }
 
 export default function PipelinePage() {
+  const router = useRouter()
   const supabase = createBrowserSupabaseClient()
   const [conversations, setConversations] = useState<ConvWithAnalysis[]>([])
   const [vendors, setVendors] = useState<User[]>([])
@@ -205,6 +207,7 @@ export default function PipelinePage() {
                           key={conv.id}
                           draggable
                           onDragStart={() => handleDragStart(conv.id)}
+                          onClick={() => router.push(`/conversations?id=${conv.id}`)}
                           className={`bg-surface border border-border rounded-md p-3 cursor-grab active:cursor-grabbing hover:shadow-md transition-all ${
                             dragging === conv.id ? 'opacity-50 ring-2 ring-primary' : ''
                           }`}
