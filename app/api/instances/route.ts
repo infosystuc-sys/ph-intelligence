@@ -68,10 +68,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    // Registrar webhook automáticamente
-    const webhookUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/webhooks/evolution`
-    const client = new EvolutionAPIClient(data as WhatsappInstance)
-    await client.registerWebhook(webhookUrl)
+    // Registrar webhook automáticamente. Apunta a N8N (no a nuestro propio
+    // /api/webhooks/evolution, que es un no-op para MESSAGES_UPSERT — los
+    // mensajes entrantes los procesa N8N directamente). Si N8N_WEBHOOK_URL no
+    // está configurada, no se registra nada y la instancia queda muda hasta
+    // que alguien lo note — preferible loguearlo fuerte a fallar en silencio.
+    const webhookUrl = process.env.N8N_WEBHOOK_URL
+    if (webhookUrl) {
+      const client = new EvolutionAPIClient(data as WhatsappInstance)
+      const registered = await client.registerWebhook(webhookUrl)
+      if (!registered) {
+        console.error(`[instances] No se pudo registrar el webhook de N8N para "${instance_name}"`)
+      }
+    } else {
+      console.error('[instances] N8N_WEBHOOK_URL no configurada — instancia creada SIN webhook')
+    }
 
     return NextResponse.json({ data })
   } catch (error) {

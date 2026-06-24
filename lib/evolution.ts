@@ -150,20 +150,24 @@ export class EvolutionAPIClient {
     }
   }
 
-  // Registrar webhook para recibir mensajes en tiempo real
+  // Registrar webhook para recibir mensajes en tiempo real.
+  // El payload va envuelto en `webhook` y requiere `enabled` explícito —
+  // confirmado el 24/6/2026 probando contra la instancia real: sin estos dos
+  // campos Evolution API v2 devuelve 400 y el registro queda silenciosamente
+  // sin webhook (causa raíz de que la instancia "9000" dejara de recibir
+  // mensajes desde el 19/6).
   async registerWebhook(webhookUrl: string): Promise<boolean> {
     try {
       await this.fetch(`/webhook/set/${this.instanceName}`, {
         method: 'POST',
         body: JSON.stringify({
-          url: webhookUrl,
-          webhook_by_events: false,
-          webhook_base64: false,
-          events: [
-            'MESSAGES_UPSERT',
-            'MESSAGES_UPDATE',
-            'CONNECTION_UPDATE',
-          ],
+          webhook: {
+            enabled: true,
+            url: webhookUrl,
+            webhookByEvents: false,
+            webhookBase64: false,
+            events: ['MESSAGES_UPSERT'],
+          },
         }),
       })
       return true
