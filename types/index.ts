@@ -119,8 +119,13 @@ export interface EvolutionChat {
   lastMessage?: {
     message: { conversation?: string }
     messageTimestamp: number
+    key?: { remoteJidAlt?: string }
   }
   updatedAt?: string
+  // Número real detrás de un remoteJid enmascarado (@lid). Evolution lo expone
+  // en lastMessage.key.remoteJidAlt cuando el contacto usa "Linked ID" — se
+  // extrae acá para no repetir esa ruta en cada lugar que lo necesite.
+  remoteJidAlt?: string | null
 }
 
 export interface EvolutionMessage {
@@ -128,6 +133,7 @@ export interface EvolutionMessage {
     remoteJid: string
     fromMe: boolean
     id: string
+    remoteJidAlt?: string
   }
   message: {
     conversation?: string

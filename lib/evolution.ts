@@ -106,11 +106,15 @@ export class EvolutionAPIClient {
           // Normalizar cada elemento: algunos devuelven `id` en lugar de `remoteJid`
           return arr.map((c: unknown) => {
             const chat = c as Record<string, unknown>
+            const lastMessage = chat.lastMessage as EvolutionChat['lastMessage']
             return {
-              id:          (chat.id ?? chat.remoteJid ?? '') as string,
-              remoteJid:   (chat.remoteJid ?? chat.id ?? '') as string,
-              name:        (chat.name ?? null) as string | null,
-              lastMessage: chat.lastMessage as EvolutionChat['lastMessage'],
+              id:           (chat.id ?? chat.remoteJid ?? '') as string,
+              remoteJid:    (chat.remoteJid ?? chat.id ?? '') as string,
+              name:         (chat.name ?? null) as string | null,
+              lastMessage,
+              // Número real detrás de un remoteJid @lid (Linked ID) — null si el
+              // contacto usa direccionamiento normal o si Evolution no lo expone.
+              remoteJidAlt: lastMessage?.key?.remoteJidAlt ?? null,
             }
           }).filter(c => !!c.remoteJid)
         }
@@ -189,6 +193,19 @@ export class EvolutionAPIClient {
   }
 }
 
+// Resuelve el teléfono real de un chat. Si el remoteJid es @lid (Linked ID
+// enmascarado por WhatsApp), busca el número verdadero en remoteJidAlt — primero
+// a nivel chat, después en el primer mensaje que lo traiga. Si no se encuentra,
+// devuelve el jid tal cual (marcado, sin inferir un número que no es real — ver
+// convención del proyecto sobre no introducir datos no reales en backfills).
+function resolvePhone(jid: string, chat: EvolutionChat, messages: EvolutionMessage[]): string {
+  if (!jid.endsWith('@lid')) {
+    return jid.replace('@s.whatsapp.net', '').replace('@g.us', '')
+  }
+  const alt = chat.remoteJidAlt ?? messages.find(m => m.key?.remoteJidAlt)?.key.remoteJidAlt
+  return alt ? alt.replace('@s.whatsapp.net', '') : jid
+}
+
 // ── Servicio de Sincronización ────────────────────────────────────────────────
 export async function syncInstanceConversations(
   instance: WhatsappInstance,
@@ -247,7 +264,11 @@ export async function syncInstanceConversations(
     try {
       const jid = chat.remoteJid || chat.id
       if (!jid) continue
-      const phone = jid.replace('@s.whatsapp.net', '').replace('@g.us', '')
+
+      // Mensajes primero: si el jid es @lid (Linked ID enmascarado), el número
+      // real solo aparece en remoteJidAlt de los mensajes, no en el chat.
+      const messages = await client.getMessages(jid, 100)
+      const phone = resolvePhone(jid, chat, messages)
 
       // PATCH DEFENSIVO (backfill 27/5-8/6):
       // En vez de upsert (que pisaba status='active' y client_name de filas existentes),
@@ -291,7 +312,6 @@ export async function syncInstanceConversations(
 
       // Sincronizar mensajes — un mensaje con payload inesperado de Evolution
       // no debe abortar el chat completo (perderíamos los otros 99 mensajes).
-      const messages = await client.getMessages(jid, 100)
       let maxMsgTs = 0
       for (const msg of messages) {
         try {
