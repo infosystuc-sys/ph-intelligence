@@ -1,7 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { Phone, Plus, Pencil, Trash2, Check, X, Loader2, Info } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Phone, Plus, Pencil, Trash2, Check, X, Loader2, Info, Search } from 'lucide-react'
 
 type EmployeePhone = {
   id: string
@@ -17,6 +17,7 @@ const EMPTY_FORM: FormState = { phone: '', name: '', notes: '' }
 export default function EmployeePhonesPage() {
   const [phones, setPhones] = useState<EmployeePhone[]>([])
   const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
 
   // Nuevo registro
   const [showAdd, setShowAdd] = useState(false)
@@ -35,6 +36,18 @@ export default function EmployeePhonesPage() {
   const [deleting, setDeleting] = useState<string | null>(null)
 
   useEffect(() => { load() }, [])
+
+  // Búsqueda por teléfono: se compara solo los dígitos para que no importe si
+  // el usuario tipea espacios, guiones o el "+" inicial.
+  const digitsOnly = (s: string) => s.replace(/\D/g, '')
+  const filteredPhones = useMemo(() => {
+    const q = digitsOnly(search)
+    if (!q) return phones
+    return phones.filter(p =>
+      digitsOnly(p.phone).includes(q) ||
+      (p.name ?? '').toLowerCase().includes(search.toLowerCase())
+    )
+  }, [phones, search])
 
   const load = async () => {
     setLoading(true)
@@ -101,6 +114,11 @@ export default function EmployeePhonesPage() {
           </h1>
           <p className="text-sm text-gray-500 mt-0.5">
             Los números registrados aquí pueden filtrarse en el módulo de Conversaciones.
+            {!loading && (
+              search
+                ? ` ${filteredPhones.length} de ${phones.length} coinciden.`
+                : ` ${phones.length} registrados.`
+            )}
           </p>
         </div>
         <button
@@ -110,6 +128,18 @@ export default function EmployeePhonesPage() {
           {showAdd ? <X size={14} /> : <Plus size={14} />}
           {showAdd ? 'Cancelar' : 'Agregar'}
         </button>
+      </div>
+
+      {/* Buscador */}
+      <div className="relative">
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Buscar por teléfono o nombre..."
+          className="w-full border border-border rounded-md pl-9 pr-3 py-2 text-sm bg-surface text-body focus:outline-none focus:ring-2 focus:ring-primary"
+        />
       </div>
 
       {/* Aviso formato */}
@@ -186,6 +216,10 @@ export default function EmployeePhonesPage() {
           <div className="text-center text-gray-400 text-sm py-12">
             No hay teléfonos registrados aún
           </div>
+        ) : filteredPhones.length === 0 ? (
+          <div className="text-center text-gray-400 text-sm py-12">
+            Ningún número coincide con &quot;{search}&quot; ({phones.length} registrados en total)
+          </div>
         ) : (
           <table className="w-full text-sm">
             <thead>
@@ -198,7 +232,7 @@ export default function EmployeePhonesPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {phones.map(p => {
+              {filteredPhones.map(p => {
                 const isEditing = editingId === p.id
                 return (
                   <tr key={p.id} className={`transition-colors ${isEditing ? 'bg-yellow-50' : 'hover:bg-bg'}`}>
