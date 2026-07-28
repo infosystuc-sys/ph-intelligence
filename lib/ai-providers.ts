@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, Type } from '@google/genai'
-import { createServiceSupabaseClient } from './supabase-server'
 
 // Schema de la respuesta esperada del analizador IA.
 // Cuando se pasa a Gemini como responseSchema, el modelo se ve obligado
@@ -28,13 +27,6 @@ const ANALYSIS_RESPONSE_SCHEMA = {
 }
 
 export type AIProvider = 'anthropic' | 'gemini' | 'groq'
-
-// Lista canónica de proveedores válidos. Reutilizable para validación en runtime.
-export const VALID_PROVIDERS: readonly AIProvider[] = ['anthropic', 'gemini', 'groq'] as const
-
-export function isAIProvider(v: unknown): v is AIProvider {
-  return typeof v === 'string' && (VALID_PROVIDERS as readonly string[]).includes(v)
-}
 
 // Modelos por proveedor
 export const AI_MODELS: Record<AIProvider, string> = {
@@ -129,47 +121,6 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, baseMs = 2000
   throw lastErr
 }
 
-// ── Obtener proveedor activo desde Supabase ───────────────────────────────────
-export async function getActiveProvider(): Promise<AIProvider> {
-  try {
-    const supabase = createServiceSupabaseClient()
-    const { data, error } = await supabase
-      .from('app_config')
-      .select('value')
-      .eq('key', 'ai_provider')
-      .maybeSingle()
-
-    if (error) {
-      // Error real de la DB (tabla inexistente, RLS, etc.) — no enmascarar
-      console.error('[getActiveProvider] Error leyendo app_config:', error)
-    } else if (isAIProvider(data?.value)) {
-      return data.value
-    }
-  } catch (e) {
-    console.error('[getActiveProvider] Excepción inesperada:', e)
-  }
-
-  // Fallback: variable de entorno o gemini por defecto
-  const envProvider = process.env.AI_PROVIDER
-  if (isAIProvider(envProvider)) return envProvider
-  return 'gemini'
-}
-
-// ── Cambiar proveedor activo ───────────────────────────────────────────────────
-export async function setActiveProvider(provider: AIProvider): Promise<void> {
-  const supabase = createServiceSupabaseClient()
-  const { error } = await supabase
-    .from('app_config')
-    .upsert(
-      { key: 'ai_provider', value: provider, updated_at: new Date().toISOString() },
-      { onConflict: 'key' },
-    )
-  if (error) {
-    console.error('[setActiveProvider] Upsert fallido:', error)
-    throw new Error(`Error al guardar ai_provider: ${error.message} (code: ${error.code ?? 'n/a'})`)
-  }
-}
-
 // ── Interfaz unificada: llamar al LLM activo ──────────────────────────────────
 export async function callAI(params: {
   provider: AIProvider
@@ -188,6 +139,87 @@ export async function callAI(params: {
     case 'groq':      return callGroq(systemPrompt, userPrompt, maxTokens)
     case 'anthropic': return callAnthropic(systemPrompt, userPrompt, maxTokens)
   }
+}
+
+// ── Jerarquía fija de fallback para el análisis de conversaciones ────────────
+// Acordado 28/7/2026: en vez de un único "proveedor activo" configurable, todo
+// análisis prueba estos 4 escalones en orden y avanza al siguiente si el actual
+// agota sus reintentos (ver withRetry). La key propia de Gemini por instancia
+// solo genera un escalón separado si realmente está configurada — si no, se
+// salta directo a la key global (usarla dos veces con la misma key sería un
+// reintento inútil, no un fallback real).
+export interface FallbackAttempt {
+  provider: AIProvider
+  label: string
+  error?: string
+}
+
+export interface FallbackResult {
+  text: string
+  providerUsed: AIProvider
+  attempts: FallbackAttempt[]
+}
+
+// Se lanza cuando los 4 escalones de la jerarquía fallaron. Lleva el detalle
+// de cada intento para que el caller pueda decidir, por ejemplo, si TODOS los
+// intentos fueron por rate limit (transitorio, reintentar después) o si hubo
+// al menos uno con un error real (key inválida, etc. — vale la pena loguearlo).
+export class AIFallbackError extends Error {
+  attempts: FallbackAttempt[]
+  constructor(message: string, attempts: FallbackAttempt[]) {
+    super(message)
+    this.name = 'AIFallbackError'
+    this.attempts = attempts
+  }
+}
+
+interface FallbackTier {
+  provider: AIProvider
+  label: string
+  apiKey?: string
+}
+
+function buildFallbackChain(instanceGeminiKey: string | null | undefined): FallbackTier[] {
+  const tiers: FallbackTier[] = []
+  if (instanceGeminiKey) {
+    tiers.push({ provider: 'gemini', label: 'Gemini (key de instancia)', apiKey: instanceGeminiKey })
+  }
+  tiers.push({ provider: 'gemini', label: 'Gemini (key global)' })
+  tiers.push({ provider: 'groq', label: 'Groq' })
+  tiers.push({ provider: 'anthropic', label: 'Anthropic' })
+  return tiers
+}
+
+export async function callAIWithFallback(params: {
+  systemPrompt: string
+  userPrompt: string
+  maxTokens?: number
+  instanceGeminiKey?: string | null
+}): Promise<FallbackResult> {
+  const { systemPrompt, userPrompt, maxTokens, instanceGeminiKey } = params
+  const chain = buildFallbackChain(instanceGeminiKey)
+  const attempts: FallbackAttempt[] = []
+
+  for (const tier of chain) {
+    try {
+      const text = await callAI({
+        provider: tier.provider,
+        systemPrompt,
+        userPrompt,
+        maxTokens,
+        apiKey: tier.apiKey,
+      })
+      attempts.push({ provider: tier.provider, label: tier.label })
+      return { text, providerUsed: tier.provider, attempts }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      console.warn(`[AI] Falló ${tier.label}, probando siguiente escalón —`, errMsg.slice(0, 200))
+      attempts.push({ provider: tier.provider, label: tier.label, error: errMsg })
+    }
+  }
+
+  const summary = attempts.map(a => `${a.label}: ${a.error}`).join(' | ')
+  throw new AIFallbackError(`Los ${attempts.length} proveedores de IA fallaron — ${summary}`, attempts)
 }
 
 // ── Anthropic ─────────────────────────────────────────────────────────────────

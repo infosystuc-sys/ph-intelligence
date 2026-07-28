@@ -131,7 +131,7 @@ export default function AnalysisReport({ analysis, conversation, vendor, userRol
                 {sentimentLabel[analysis.sentiment]}
               </span>
               <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-500 border border-gray-200">
-                Analizado {new Date(analysis.analyzed_at).toLocaleDateString('es-AR')}
+                Analizado {new Date(analysis.analyzed_at).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
               {allAnalyses.length > 1 && (
                 <span className="text-xs px-2 py-1 rounded-full bg-primary/10 text-primary border border-primary/20">

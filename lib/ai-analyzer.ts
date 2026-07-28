@@ -1,6 +1,6 @@
 import { createServiceSupabaseClient } from './supabase-server'
 import { AIAnalysisResponse, ConversationStage, Message } from '@/types'
-import { getActiveProvider, callAI, AI_MODELS, isRateLimitError } from './ai-providers'
+import { callAIWithFallback, AIFallbackError, AI_MODELS, isRateLimitError, AIProvider } from './ai-providers'
 import { jsonrepair } from 'jsonrepair'
 
 const SYSTEM_PROMPT = `Eres un experto en ventas consultivas y fidelización de clientes en el rubro de electrodomésticos y artículos para el hogar en Argentina.
@@ -160,20 +160,22 @@ ${conversationText}
 
 Genera el análisis completo en JSON.`
 
-  // 3. Detectar proveedor activo y llamar al LLM
-  const provider = await getActiveProvider()
+  // 3. Llamar al LLM siguiendo la jerarquía de fallback: Gemini (key de la
+  // instancia) → Gemini (key global) → Groq → Anthropic. Ver callAIWithFallback.
   let analysisData: AIAnalysisResponse
-
   let rawText = ''
+  let providerUsed: AIProvider | null = null
+
   try {
     const instanceGeminiKey = (conversation.instance as { gemini_api_key: string | null } | null)?.gemini_api_key
-    rawText = await callAI({
-      provider,
+    const result = await callAIWithFallback({
       systemPrompt: SYSTEM_PROMPT,
       userPrompt,
       maxTokens: 2048,
-      apiKey: instanceGeminiKey ?? undefined,
+      instanceGeminiKey,
     })
+    rawText = result.text
+    providerUsed = result.providerUsed
 
     analysisData = parseLLMJSON(rawText) as AIAnalysisResponse
   } catch (e) {
@@ -183,10 +185,21 @@ Genera el análisis completo en JSON.`
       console.error(`[AI] extractJSON devolvio (primeros 200 chars):`)
       console.error(extractJSON(rawText).slice(0, 200))
     }
-    const rateLimit = isRateLimitError(e)
+
+    // Si se agotaron los 4 escalones, solo tratamos el fallo como "rate limit
+    // transitorio" (no se loguea como error, se reintenta el próximo ciclo) si
+    // TODOS los proveedores fallaron por eso — si al menos uno falló por otra
+    // razón (key inválida, etc.), vale la pena que quede registrado.
+    const rateLimit = e instanceof AIFallbackError
+      ? e.attempts.every(a => a.error && isRateLimitError(a.error))
+      : isRateLimitError(e)
+
+    const modelUsedForLog = providerUsed ? AI_MODELS[providerUsed] : null
     const errMsg = rateLimit
-      ? `Rate limit (${provider}): reintentos agotados. La conversación se reintentará en el próximo ciclo.`
-      : `Error en análisis IA (${provider}): ${String(e)}`
+      ? `Rate limit: los proveedores probados agotaron sus reintentos. La conversación se reintentará en el próximo ciclo.`
+      : providerUsed
+        ? `Error en análisis IA (${providerUsed}): ${String(e)}`
+        : `Error en análisis IA (los 4 proveedores fallaron): ${String(e)}`
 
     // Los errores de rate limit son transitorios: no los persistimos como fallas
     // para no contaminar el historial de logs ni penalizar la conversación.
@@ -196,7 +209,7 @@ Genera el análisis completo en JSON.`
         vendedor_id: conversation.vendedor_id,
         triggered_by: triggeredBy,
         status: 'error',
-        model_used: AI_MODELS[provider],
+        model_used: modelUsedForLog,
         error_message: errMsg.slice(0, 500),
         duration_ms: Date.now() - startTime,
         message_count: messages.length,
@@ -207,6 +220,8 @@ Genera el análisis completo en JSON.`
 
     return { success: false, error: errMsg, isRateLimit: rateLimit }
   }
+
+  const modelUsed = AI_MODELS[providerUsed!]
 
   // 4. Validar y sanitizar datos
   const safeAnalysis = sanitizeAnalysis(analysisData)
@@ -229,7 +244,7 @@ Genera el análisis completo en JSON.`
       executive_summary: safeAnalysis.executive_summary,
       vendor_coaching_note: safeAnalysis.vendor_coaching_note,
       full_report: JSON.stringify(safeAnalysis, null, 2),
-      model_used: AI_MODELS[provider],
+      model_used: modelUsed,
     })
     .select()
     .single()
@@ -240,7 +255,7 @@ Genera el análisis completo en JSON.`
       vendedor_id: conversation.vendedor_id,
       triggered_by: triggeredBy,
       status: 'error',
-      model_used: AI_MODELS[provider],
+      model_used: modelUsed,
       error_message: 'Error al guardar el análisis en la base de datos',
       duration_ms: Date.now() - startTime,
       message_count: messages.length,
@@ -255,7 +270,7 @@ Genera el análisis completo en JSON.`
     triggered_by: triggeredBy,
     status: 'success',
     analysis_id: savedAnalysis.id,
-    model_used: AI_MODELS[provider],
+    model_used: modelUsed,
     duration_ms: Date.now() - startTime,
     message_count: messages.length,
   })

@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
-import { getActiveProvider, setActiveProvider, AIProvider, isAIProvider } from '@/lib/ai-providers'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET() {
   try {
-    const [provider, autoAnalysisEnabled] = await Promise.all([
-      getActiveProvider(),
-      getAutoAnalysisEnabled(),
-    ])
-    return NextResponse.json({ ai_provider: provider, auto_analysis_enabled: autoAnalysisEnabled })
+    const autoAnalysisEnabled = await getAutoAnalysisEnabled()
+    return NextResponse.json({ auto_analysis_enabled: autoAnalysisEnabled })
   } catch {
     return NextResponse.json({ error: 'Error interno' }, { status: 500 })
   }
@@ -28,14 +24,7 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: 'Solo admins pueden cambiar la configuración' }, { status: 403 })
     }
 
-    const body = await req.json() as { ai_provider?: AIProvider; auto_analysis_enabled?: boolean }
-
-    if (body.ai_provider !== undefined) {
-      if (!isAIProvider(body.ai_provider)) {
-        return NextResponse.json({ error: 'Proveedor inválido' }, { status: 400 })
-      }
-      await setActiveProvider(body.ai_provider)
-    }
+    const body = await req.json() as { auto_analysis_enabled?: boolean }
 
     if (body.auto_analysis_enabled !== undefined) {
       await setAutoAnalysisEnabled(body.auto_analysis_enabled)

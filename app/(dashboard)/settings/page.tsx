@@ -6,7 +6,6 @@ import { User, WhatsappInstance, InstanceHealthResult } from '@/types'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import InstanceHealthBadge from '@/components/settings/InstanceHealthBadge'
 import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2, ScrollText, AlertCircle, Clock, Archive, Filter } from 'lucide-react'
-import type { AIProvider } from '@/lib/ai-providers'
 import { formatDistanceToNow } from '@/lib/utils'
 import { useRouter } from 'next/navigation'
 import { useSyncContext } from '@/contexts/SyncContext'
@@ -16,10 +15,6 @@ export default function SettingsPage() {
   const supabase = createBrowserSupabaseClient()
   const syncCtx = useSyncContext()
   const [activeTab, setActiveTab] = useState<'users' | 'instances' | 'ia' | 'api' | 'logs' | 'maintenance'>('users')
-  const [aiProvider, setAiProvider] = useState<AIProvider>('anthropic')
-  const [savingProvider, setSavingProvider] = useState(false)
-  const [providerSaved, setProviderSaved] = useState(false)
-  const [providerError, setProviderError] = useState<string | null>(null)
 
   // Instancias
   const [showNewInstance, setShowNewInstance] = useState(false)
@@ -167,15 +162,12 @@ export default function SettingsPage() {
 
   const loadData = async () => {
     setLoading(true)
-    const [usersRes, instancesRes, configRes] = await Promise.all([
+    const [usersRes, instancesRes] = await Promise.all([
       fetch('/api/vendors'),
       fetch('/api/instances'),
-      fetch('/api/config'),
     ])
     const usersData = await usersRes.json()
     const instancesData = await instancesRes.json()
-    const configData = await configRes.json()
-    if (configData.ai_provider) setAiProvider(configData.ai_provider)
     setUsers(usersData.data ?? [])
     setInstances(instancesData.data ?? [])
     setLoading(false)
@@ -247,36 +239,6 @@ export default function SettingsPage() {
     setDeletingInstance(null)
     setConfirmDeleteInstance(null)
     if (res.ok) await loadData()
-  }
-
-  const saveProvider = async (provider: AIProvider) => {
-    setSavingProvider(true)
-    setProviderSaved(false)
-    setProviderError(null)
-    try {
-      const res = await fetch('/api/config', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ai_provider: provider }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setProviderError(data.error ?? `HTTP ${res.status}`)
-        return
-      }
-      // Confirmar leyendo de la DB que efectivamente se guardó
-      const verifyRes = await fetch('/api/config', { cache: 'no-store' })
-      const verifyData = await verifyRes.json()
-      if (verifyData.ai_provider !== provider) {
-        setProviderError(`El servidor respondió OK pero la DB sigue con "${verifyData.ai_provider}". Posible problema de RLS o service role.`)
-        return
-      }
-      setAiProvider(provider)
-      setProviderSaved(true)
-      setTimeout(() => setProviderSaved(false), 3000)
-    } finally {
-      setSavingProvider(false)
-    }
   }
 
   const loadRemoteInstances = async () => {
@@ -1229,130 +1191,35 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg shadow-sm border border-border p-6">
             <h3 className="font-semibold text-body flex items-center gap-2 mb-1">
-              <Brain size={16} className="text-primary" /> Proveedor de Inteligencia Artificial
+              <Brain size={16} className="text-primary" /> Proveedores de Inteligencia Artificial
             </h3>
             <p className="text-sm text-gray-500 mb-6">
-              Seleccioná qué modelo de IA se usa para analizar las conversaciones. El cambio aplica inmediatamente para todos los análisis nuevos.
+              Cada análisis prueba estos proveedores en orden y pasa al siguiente si el actual falla — no hay un único proveedor "activo" para elegir.
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {/* Card Anthropic */}
-              <button
-                onClick={() => saveProvider('anthropic')}
-                disabled={savingProvider}
-                className={`relative text-left p-5 rounded-lg border-2 transition-all ${
-                  aiProvider === 'anthropic'
-                    ? 'border-primary bg-red-50'
-                    : 'border-border bg-surface hover:border-gray-300'
-                }`}
-              >
-                {aiProvider === 'anthropic' && (
-                  <span className="absolute top-3 right-3 text-primary">
-                    <CheckCircle size={18} />
+            <div className="space-y-3">
+              {[
+                { n: 1, name: 'Gemini', detail: 'con la API key propia de la instancia de WhatsApp (si tiene una configurada)', model: 'gemini-2.5-flash', color: '#4285F4', letter: 'G' },
+                { n: 2, name: 'Gemini', detail: 'con la API key global', model: 'gemini-2.5-flash', color: '#4285F4', letter: 'G' },
+                { n: 3, name: 'Groq', detail: 'si Gemini no responde', model: 'llama-3.3-70b-versatile', color: '#F55036', letter: 'Q' },
+                { n: 4, name: 'Anthropic Claude', detail: 'último recurso si los anteriores fallan', model: 'claude-sonnet-4-20250514', color: '#CC785C', letter: 'A' },
+              ].map(tier => (
+                <div key={tier.n} className="flex items-center gap-3 p-3 rounded-lg border border-border bg-bg">
+                  <span className="w-6 h-6 rounded-full bg-surface border border-border flex items-center justify-center text-xs font-bold text-gray-500 shrink-0">
+                    {tier.n}
                   </span>
-                )}
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 rounded-lg bg-[#CC785C] flex items-center justify-center text-white font-bold text-lg">
-                    A
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm shrink-0" style={{ backgroundColor: tier.color }}>
+                    {tier.letter}
                   </div>
-                  <div>
-                    <p className="font-semibold text-body">Anthropic Claude</p>
-                    <p className="text-xs text-gray-500 font-mono">claude-sonnet-4-20250514</p>
+                  <div className="min-w-0">
+                    <p className="font-medium text-body text-sm">
+                      {tier.name} <span className="text-gray-500 font-normal">— {tier.detail}</span>
+                    </p>
+                    <p className="text-xs text-gray-400 font-mono">{tier.model}</p>
                   </div>
                 </div>
-                <ul className="text-xs text-gray-600 space-y-1">
-                  <li>✓ Mejor razonamiento en español</li>
-                  <li>✓ Análisis más detallado y contextual</li>
-                  <li>✓ Respuestas JSON muy precisas</li>
-                </ul>
-                {aiProvider === 'anthropic' && (
-                  <div className="mt-3 text-xs font-semibold text-primary">Activo actualmente</div>
-                )}
-              </button>
-
-              {/* Card Gemini */}
-              <button
-                onClick={() => saveProvider('gemini')}
-                disabled={savingProvider}
-                className={`relative text-left p-5 rounded-lg border-2 transition-all ${
-                  aiProvider === 'gemini'
-                    ? 'border-primary bg-red-50'
-                    : 'border-border bg-surface hover:border-gray-300'
-                }`}
-              >
-                {aiProvider === 'gemini' && (
-                  <span className="absolute top-3 right-3 text-primary">
-                    <CheckCircle size={18} />
-                  </span>
-                )}
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 rounded-lg bg-[#4285F4] flex items-center justify-center text-white font-bold text-lg">
-                    G
-                  </div>
-                  <div>
-                    <p className="font-semibold text-body">Google Gemini</p>
-                    <p className="text-xs text-gray-500 font-mono">gemini-flash-latest</p>
-                  </div>
-                </div>
-                <ul className="text-xs text-gray-600 space-y-1">
-                  <li>✓ Muy rápido en respuestas</li>
-                  <li>✓ Costo menor por análisis</li>
-                  <li>✓ Buen rendimiento general</li>
-                </ul>
-                {aiProvider === 'gemini' && (
-                  <div className="mt-3 text-xs font-semibold text-primary">Activo actualmente</div>
-                )}
-              </button>
-
-              {/* Card Groq */}
-              <button
-                onClick={() => saveProvider('groq')}
-                disabled={savingProvider}
-                className={`relative text-left p-5 rounded-lg border-2 transition-all ${
-                  aiProvider === 'groq'
-                    ? 'border-primary bg-red-50'
-                    : 'border-border bg-surface hover:border-gray-300'
-                }`}
-              >
-                {aiProvider === 'groq' && (
-                  <span className="absolute top-3 right-3 text-primary">
-                    <CheckCircle size={18} />
-                  </span>
-                )}
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 rounded-lg bg-[#F55036] flex items-center justify-center text-white font-bold text-lg">
-                    Q
-                  </div>
-                  <div>
-                    <p className="font-semibold text-body">Groq (Llama 3.3)</p>
-                    <p className="text-xs text-gray-500 font-mono">llama-3.3-70b-versatile</p>
-                  </div>
-                </div>
-                <ul className="text-xs text-gray-600 space-y-1">
-                  <li>✓ Capa gratuita muy generosa</li>
-                  <li>✓ Respuestas ultra rápidas</li>
-                  <li>✓ Ideal para alto volumen</li>
-                </ul>
-                {aiProvider === 'groq' && (
-                  <div className="mt-3 text-xs font-semibold text-primary">Activo actualmente</div>
-                )}
-              </button>
+              ))}
             </div>
-
-            {providerSaved && (
-              <div className="mt-4 flex items-center gap-2 text-sm text-green-600">
-                <CheckCircle size={14} /> Proveedor guardado correctamente
-              </div>
-            )}
-            {providerError && (
-              <div className="mt-4 flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-3">
-                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                <span className="break-words">{providerError}</span>
-              </div>
-            )}
-            {savingProvider && (
-              <p className="mt-4 text-sm text-gray-400">Guardando...</p>
-            )}
           </div>
 
           {/* Análisis autónomo: reactivado 20/6/2026 */}
@@ -1371,12 +1238,11 @@ export default function SettingsPage() {
           </div>
 
           <div className="p-4 bg-blue-50 rounded-md border border-blue-200 text-xs text-blue-700">
-            <p className="font-semibold mb-1">Variables de entorno requeridas según proveedor:</p>
+            <p className="font-semibold mb-1">Variables de entorno usadas por la jerarquía:</p>
             <ul className="list-disc list-inside space-y-1 font-mono">
-              <li>ANTHROPIC_API_KEY — requerida si usás Claude</li>
-              <li>GEMINI_API_KEY — requerida si usás Gemini</li>
-              <li>GROQ_API_KEY — requerida si usás Groq</li>
-              <li>AI_PROVIDER — opcional, fallback si app_config está vacío (anthropic, gemini o groq)</li>
+              <li>GEMINI_API_KEY — key global de Gemini (escalón 2)</li>
+              <li>GROQ_API_KEY — escalón 3</li>
+              <li>ANTHROPIC_API_KEY — escalón 4</li>
             </ul>
           </div>
         </div>
