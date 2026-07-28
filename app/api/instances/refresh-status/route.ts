@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
-import { evolutionFetch } from '@/lib/evolution'
+import { checkInstanceHealth } from '@/lib/instance-health'
+import { InstanceHealthResult } from '@/types'
 
 export const maxDuration = 30
 
 // POST /api/instances/refresh-status
-// Consulta el estado real de cada instancia en Evolution API y actualiza la DB.
-// Responde con { results: { instanceId, connected, state }[] }
+// Verifica conexión + webhook + último mensaje recibido de cada instancia
+// contra Evolution API y la base, y actualiza whatsapp_instances.status.
+// Responde con { results: InstanceHealthResult[] }
 export async function POST() {
   try {
     const supabase = await createServerSupabaseClient()
@@ -20,47 +22,33 @@ export async function POST() {
 
     if (!instances?.length) return NextResponse.json({ results: [] })
 
-    const baseUrl = (process.env.EVOLUTION_API_BASE_URL ?? '').replace(/\/$/, '')
-
     const checks = await Promise.allSettled(
-      instances.map(async (inst) => {
-        const instUrl = (baseUrl || inst.api_url).replace(/\/$/, '')
-        const endpoint = `${instUrl}/instance/connectionState/${inst.instance_name}`
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 5000)
-
-        try {
-          const res = await evolutionFetch(endpoint, {
-            headers: { apikey: inst.api_key },
-            signal: controller.signal,
-          })
-          clearTimeout(timeout)
-
-          const data = res.ok ? await res.json() : null
-          const state: string = data?.instance?.state ?? data?.state ?? 'unknown'
-          const connected = state === 'open'
-
-          await service
-            .from('whatsapp_instances')
-            .update({ status: connected ? 'connected' : 'disconnected' })
-            .eq('id', inst.id)
-
-          return { instanceId: inst.id, connected, state }
-        } catch {
-          clearTimeout(timeout)
-          await service
-            .from('whatsapp_instances')
-            .update({ status: 'disconnected' })
-            .eq('id', inst.id)
-          return { instanceId: inst.id, connected: false, state: 'unreachable' }
-        }
+      instances.map(async (inst): Promise<InstanceHealthResult> => {
+        const result = await checkInstanceHealth(inst, service)
+        await service
+          .from('whatsapp_instances')
+          .update({ status: result.connected ? 'connected' : 'disconnected' })
+          .eq('id', inst.id)
+        return result
       })
     )
 
-    const results = checks.map(r =>
+    const results: InstanceHealthResult[] = checks.map((r, i) =>
       r.status === 'fulfilled'
         ? r.value
-        : { instanceId: '', connected: false, state: 'error' }
+        : {
+            instanceId: instances[i].id,
+            connected: false,
+            connectionVerified: false,
+            connectionState: 'unknown',
+            disconnectReason: null,
+            disconnectedAt: null,
+            webhookVerified: false,
+            webhookOk: null,
+            webhookUrl: null,
+            lastInboundMessageAt: null,
+            health: 'yellow',
+          }
     )
 
     return NextResponse.json({ results })

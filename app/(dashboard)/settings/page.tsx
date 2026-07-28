@@ -2,8 +2,9 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
-import { User, WhatsappInstance } from '@/types'
+import { User, WhatsappInstance, InstanceHealthResult } from '@/types'
 import VendorAvatar from '@/components/ui/VendorAvatar'
+import InstanceHealthBadge from '@/components/settings/InstanceHealthBadge'
 import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle, X, Save, Loader2, Signal, Trash2, ScrollText, AlertCircle, Clock, Archive, Filter } from 'lucide-react'
 import type { AIProvider } from '@/lib/ai-providers'
 import { formatDistanceToNow } from '@/lib/utils'
@@ -47,6 +48,9 @@ export default function SettingsPage() {
   const [savedMsg, setSavedMsg] = useState('')
   const [remoteInstances, setRemoteInstances] = useState<string[] | null>(null)
   const [loadingRemote, setLoadingRemote] = useState(false)
+  const [instanceHealth, setInstanceHealth] = useState<Record<string, InstanceHealthResult>>({})
+  const [checkingHealth, setCheckingHealth] = useState(false)
+  const healthCheckedRef = useRef(false)
 
   // Nuevo usuario
   const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'vendedor', password: '', supervisor_id: '' })
@@ -132,6 +136,25 @@ export default function SettingsPage() {
     checkAdminAccess()
     loadData()
   }, [])
+
+  useEffect(() => {
+    if (activeTab === 'instances' && !healthCheckedRef.current) {
+      healthCheckedRef.current = true
+      checkInstancesHealth()
+    }
+  }, [activeTab])
+
+  const checkInstancesHealth = async () => {
+    setCheckingHealth(true)
+    try {
+      const res = await fetch('/api/instances/refresh-status', { method: 'POST' })
+      if (!res.ok) return
+      const { results } = await res.json() as { results: InstanceHealthResult[] }
+      setInstanceHealth(Object.fromEntries(results.map(r => [r.instanceId, r])))
+    } finally {
+      setCheckingHealth(false)
+    }
+  }
 
   const checkAdminAccess = async () => {
     const { data: { user } } = await supabase.auth.getUser()
@@ -1074,9 +1097,10 @@ export default function SettingsPage() {
                               )}
                             </div>
                           ) : (
-                            <span className={`flex items-center gap-1 text-xs font-medium ${inst.status === 'connected' ? 'text-green-600' : 'text-gray-400'}`}>
-                              {inst.status === 'connected' ? <><Wifi size={12} /> Conectada</> : <><WifiOff size={12} /> {inst.status}</>}
-                            </span>
+                            <InstanceHealthBadge
+                              health={instanceHealth[inst.id]}
+                              checking={checkingHealth && !instanceHealth[inst.id]}
+                            />
                           )}
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-400">

@@ -20,6 +20,24 @@ export function formatDistanceToNow(date: Date): string {
   return date.toLocaleDateString('es-AR', { timeZone: 'UTC', day: '2-digit', month: '2-digit' })
 }
 
+// ── Formatear tiempo relativo para timestamps genuinamente UTC ───────────────
+// A diferencia de formatDistanceToNow, esta NO compensa los -3h de N8N: úsala
+// para timestamps que ya vienen correctamente etiquetados en UTC (ej. los que
+// devuelve Evolution API directamente, como disconnectionAt), nunca para
+// campos poblados por el pipeline de N8N.
+export function formatDistanceToNowUTC(date: Date): string {
+  const diffMs = Date.now() - date.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  const diffHr  = Math.floor(diffMin / 60)
+  const diffDay = Math.floor(diffHr / 24)
+
+  if (diffMin < 1) return 'ahora'
+  if (diffMin < 60) return `hace ${diffMin}m`
+  if (diffHr  < 24) return `hace ${diffHr}h`
+  if (diffDay < 7)  return `hace ${diffDay}d`
+  return date.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit' })
+}
+
 // ── Formatear fecha larga ─────────────────────────────────────────────────────
 export function formatDateLong(date: Date | string): string {
   const d = typeof date === 'string' ? new Date(date) : date

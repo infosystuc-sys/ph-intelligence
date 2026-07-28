@@ -37,6 +37,24 @@ export interface WhatsappInstance {
   vendedor?: User
 }
 
+// ── Estado real de instancias WhatsApp (conexión + webhook + últimos mensajes) ─
+export type ConnectionState = 'open' | 'close' | 'connecting' | 'unknown'
+export type InstanceHealthColor = 'green' | 'yellow' | 'red'
+
+export interface InstanceHealthResult {
+  instanceId: string
+  connected: boolean
+  connectionVerified: boolean
+  connectionState: ConnectionState
+  disconnectReason: string | null
+  disconnectedAt: string | null
+  webhookVerified: boolean
+  webhookOk: boolean | null
+  webhookUrl: string | null
+  lastInboundMessageAt: string | null
+  health: InstanceHealthColor
+}
+
 // ── Conversaciones ────────────────────────────────────────────────────────────
 export interface Conversation {
   id: string

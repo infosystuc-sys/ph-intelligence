@@ -6,7 +6,7 @@ import KpiCard from '@/components/ui/KpiCard'
 import ScoreBadge, { getScoreRowClass } from '@/components/ui/ScoreBadge'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import { SkeletonCard, SkeletonTable } from '@/components/ui/LoadingSkeleton'
-import { DashboardStats, User } from '@/types'
+import { DashboardStats, User, InstanceHealthResult } from '@/types'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { useAutoAnalysis } from '@/lib/useAutoAnalysis'
 import {
@@ -211,9 +211,7 @@ export default function DashboardPage() {
     try {
       const res = await fetch('/api/instances/refresh-status', { method: 'POST' })
       if (!res.ok) return
-      const { results } = await res.json() as {
-        results: { instanceId: string; connected: boolean; state: string }[]
-      }
+      const { results } = await res.json() as { results: InstanceHealthResult[] }
 
       if (!results?.length) return
 
