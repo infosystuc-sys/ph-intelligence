@@ -64,6 +64,9 @@ export default function InstanceHealthBadge({
               {health.disconnectedAt && (
                 <p className="text-gray-400 mt-0.5">Desde {formatDistanceToNowUTC(new Date(health.disconnectedAt))}</p>
               )}
+              {!health.connectionVerified && health.connectionCheckError && (
+                <p className="text-gray-500 mt-0.5 break-all font-mono text-[11px]">{health.connectionCheckError}</p>
+              )}
             </div>
           </div>
 
@@ -79,6 +82,9 @@ export default function InstanceHealthBadge({
                 <p className="text-gray-500 mt-0.5 break-all">
                   {health.webhookUrl ? `Apunta a: ${health.webhookUrl}` : 'No hay webhook registrado'}
                 </p>
+              )}
+              {!health.webhookVerified && health.webhookCheckError && (
+                <p className="text-gray-500 mt-0.5 break-all font-mono text-[11px]">{health.webhookCheckError}</p>
               )}
             </div>
           </div>

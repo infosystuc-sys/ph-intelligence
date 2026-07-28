@@ -46,9 +46,13 @@ export interface InstanceHealthResult {
   connected: boolean
   connectionVerified: boolean
   connectionState: ConnectionState
+  // Motivo del fallo de red/API cuando connectionVerified es false — null si se
+  // pudo verificar (sea cual sea el resultado) o si nunca se corrió el chequeo.
+  connectionCheckError: string | null
   disconnectReason: string | null
   disconnectedAt: string | null
   webhookVerified: boolean
+  webhookCheckError: string | null
   webhookOk: boolean | null
   webhookUrl: string | null
   lastInboundMessageAt: string | null

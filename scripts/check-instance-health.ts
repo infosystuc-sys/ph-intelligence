@@ -40,8 +40,10 @@ async function main() {
     const icon = result.health === 'green' ? '🟢' : result.health === 'red' ? '🔴' : '🟡'
     console.log(`${icon} ${inst.instance_name}`)
     console.log(`   Conexión: ${result.connectionVerified ? result.connectionState : 'no verificado'}${result.disconnectReason ? ` — ${result.disconnectReason}` : ''}`)
+    if (result.connectionCheckError) console.log(`   Error conexión: ${result.connectionCheckError}`)
     if (result.disconnectedAt) console.log(`   Desconectada desde: ${result.disconnectedAt}`)
     console.log(`   Webhook: ${!result.webhookVerified ? 'no verificado' : result.webhookOk ? 'OK' : `mal configurado (url: ${result.webhookUrl ?? 'ninguna'})`}`)
+    if (result.webhookCheckError) console.log(`   Error webhook: ${result.webhookCheckError}`)
     console.log(`   Último mensaje recibido: ${result.lastInboundMessageAt ?? 'sin registros'}`)
     console.log('')
   }
