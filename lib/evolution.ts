@@ -56,9 +56,9 @@ export async function evolutionFetch(url: string, init?: RequestInit): Promise<R
         if (secureAt) {
           detail = `TLS completado a los ${secureAt - startedAt}ms, sin respuesta ${Date.now() - secureAt}ms después`
         } else if (connectedAt) {
-          detail = `conectó TCP a los ${connectedAt - startedAt}ms pero el handshake TLS nunca terminó (${elapsedMs}ms transcurridos)`
+          detail = `conectó TCP a los ${connectedAt - startedAt}ms pero el handshake TLS nunca terminó (${elapsedMs - (connectedAt - startedAt)}ms después)`
         } else if (resolvedAt) {
-          detail = `DNS resolvió a los ${resolvedAt - startedAt}ms pero el socket nunca conectó (${elapsedMs}ms transcurridos)`
+          detail = `DNS resolvió a los ${resolvedAt - startedAt}ms pero el socket nunca conectó (${elapsedMs - (resolvedAt - startedAt)}ms después)`
         } else {
           detail = `socket nunca conectó en ${elapsedMs}ms`
         }
