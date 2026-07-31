@@ -13,6 +13,8 @@ export async function evolutionFetch(url: string, init?: RequestInit): Promise<R
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const secure = u.protocol === 'https:'
+    const startedAt = Date.now()
+    let connectedAt: number | null = null
     const req = (secure ? https : http).request(
       {
         hostname: u.hostname,
@@ -30,11 +32,26 @@ export async function evolutionFetch(url: string, init?: RequestInit): Promise<R
         )
       }
     )
+    // Registra si el socket TCP llegó a conectar y cuándo. Es la única forma de
+    // distinguir, cuando el abort dispara, entre "nunca conectó" (bloqueo de red/
+    // firewall) y "conectó pero nadie respondió" (proxy/servidor colgado) — hoy
+    // ambos casos se ven idénticos como un "AbortError" sin más info.
+    req.on('socket', (socket) => {
+      if (!socket.connecting) {
+        connectedAt = Date.now() // socket reciclado ya conectado (agente keep-alive)
+      } else {
+        socket.once('connect', () => { connectedAt = Date.now() })
+      }
+    })
     req.on('error', reject)
     if (init?.signal) {
       ;(init.signal as AbortSignal).addEventListener('abort', () => {
         req.destroy()
-        reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }))
+        const elapsedMs = Date.now() - startedAt
+        const detail = connectedAt
+          ? `socket conectado a los ${connectedAt - startedAt}ms, sin respuesta ${elapsedMs}ms después`
+          : `socket nunca conectó en ${elapsedMs}ms`
+        reject(Object.assign(new Error(`Timeout tras ${elapsedMs}ms (${detail})`), { name: 'AbortError' }))
       })
     }
     const body = init?.body
