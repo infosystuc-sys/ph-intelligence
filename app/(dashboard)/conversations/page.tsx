@@ -12,6 +12,11 @@ import { STAGE_LABELS, formatPhone, normalizePhone, looksLikeGreeting, looksLike
 import { useAutoAnalysis } from '@/lib/useAutoAnalysis'
 import { WhatsappInstance } from '@/types'
 
+// Sentinel para el filtro de instancia: distingue "sin filtro" (selectedInstance === '')
+// de "solo huérfanas" — conversaciones cuya instancia fue eliminada (instance_id null,
+// ver ON DELETE SET NULL en whatsapp_instances → conversations).
+const UNASSIGNED_INSTANCE = '__unassigned__'
+
 export default function ConversationsPage() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -540,10 +545,14 @@ export default function ConversationsPage() {
     !looksLikeGreeting(c.last_message_content) &&
     !looksLikeReactionOrSticker(c.last_message_content)
 
+  const matchesInstance = (c: Conversation) =>
+    !selectedInstance ||
+    (selectedInstance === UNASSIGNED_INSTANCE ? c.instance_id === null : c.instance_id === selectedInstance)
+
   const individualConvs = useMemo(() => conversations.filter(c =>
     !isGroup(c) &&
     !(hideEmployeePhones && employeePhones.has(c.client_phone)) &&
-    (!selectedInstance || c.instance_id === selectedInstance) &&
+    matchesInstance(c) &&
     (!filterStatus || c.status === filterStatus) &&
     (!filterUnresponded || isUnresponded24h(c)) &&
     matchesSearch(c)
@@ -557,7 +566,7 @@ export default function ConversationsPage() {
 
   const groupConvs = useMemo(() => conversations.filter(c =>
     isGroup(c) &&
-    (!selectedInstance || c.instance_id === selectedInstance) &&
+    matchesInstance(c) &&
     matchesSearch(c)
   ), [conversations, selectedInstance, debouncedSearch])
 
@@ -732,6 +741,28 @@ export default function ConversationsPage() {
                 </button>
               )
             })}
+            {(() => {
+              const unassignedCount = conversations.filter(c =>
+                !isGroup(c) &&
+                c.instance_id === null &&
+                !(hideEmployeePhones && employeePhones.has(c.client_phone))
+              ).length
+              if (unassignedCount === 0) return null
+              const active = selectedInstance === UNASSIGNED_INSTANCE
+              return (
+                <button
+                  onClick={() => setSelectedInstance(UNASSIGNED_INSTANCE)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                    active ? 'bg-primary text-white' : 'text-muted hover:bg-bg hover:text-body'
+                  }`}
+                >
+                  Sin instancia
+                  <span className={`ml-1 text-[10px] ${active ? 'opacity-80' : 'text-gray-400'}`}>
+                    ({unassignedCount})
+                  </span>
+                </button>
+              )
+            })()}
           </div>
         )}
 

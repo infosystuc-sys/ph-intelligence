@@ -63,7 +63,7 @@ export interface InstanceHealthResult {
 // ── Conversaciones ────────────────────────────────────────────────────────────
 export interface Conversation {
   id: string
-  instance_id: string
+  instance_id: string | null
   remote_jid: string
   vendedor_id: string
   status: ConversationStatus
