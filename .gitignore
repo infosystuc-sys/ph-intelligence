@@ -51,3 +51,6 @@ next-env.d.ts
 # Exports con datos reales de clientes — nunca al repo
 *.xlsx
 *.csv
+
+# Worktrees aislados para desarrollo (superpowers)
+.worktrees/
