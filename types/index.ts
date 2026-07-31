@@ -33,6 +33,7 @@ export interface WhatsappInstance {
   gemini_api_key: string | null
   status: InstanceStatus
   phone_number: string | null
+  previous_values: Record<string, unknown> | null
   last_sync_at: string | null
   vendedor?: User
 }

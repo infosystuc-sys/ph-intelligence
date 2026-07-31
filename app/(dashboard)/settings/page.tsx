@@ -9,6 +9,7 @@ import { Wifi, WifiOff, RefreshCw, Plus, Edit2, Eye, EyeOff, Brain, CheckCircle,
 import { formatDistanceToNow } from '@/lib/utils'
 import { useRouter } from 'next/navigation'
 import { useSyncContext } from '@/contexts/SyncContext'
+import type { ReconcileFinding } from '@/lib/instance-reconcile'
 
 export default function SettingsPage() {
   const router = useRouter()
@@ -46,6 +47,9 @@ export default function SettingsPage() {
   const [instanceHealth, setInstanceHealth] = useState<Record<string, InstanceHealthResult>>({})
   const [checkingHealth, setCheckingHealth] = useState(false)
   const healthCheckedRef = useRef(false)
+  const [reconcileFindings, setReconcileFindings] = useState<ReconcileFinding[] | null>(null)
+  const [loadingReconcile, setLoadingReconcile] = useState(false)
+  const [reconcileActionId, setReconcileActionId] = useState<string | null>(null)
 
   // Nuevo usuario
   const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'vendedor', password: '', supervisor_id: '' })
@@ -148,6 +152,57 @@ export default function SettingsPage() {
       setInstanceHealth(Object.fromEntries(results.map(r => [r.instanceId, r])))
     } finally {
       setCheckingHealth(false)
+    }
+  }
+
+  const loadReconcileFindings = async () => {
+    setLoadingReconcile(true)
+    try {
+      const res = await fetch('/api/instances/reconcile')
+      if (!res.ok) return
+      const { findings } = await res.json() as { findings: ReconcileFinding[] }
+      setReconcileFindings(findings)
+    } finally {
+      setLoadingReconcile(false)
+    }
+  }
+
+  const applyReconcile = async (id: string) => {
+    setReconcileActionId(id)
+    try {
+      const res = await fetch('/api/instances/reconcile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'apply', id }),
+      })
+      const result = await res.json() as { ok: boolean; error?: string }
+      if (result.ok) {
+        await loadData()
+        await loadReconcileFindings()
+      } else {
+        alert(result.error ?? 'No se pudo aplicar la corrección')
+      }
+    } finally {
+      setReconcileActionId(null)
+    }
+  }
+
+  const undoReconcile = async (id: string) => {
+    setReconcileActionId(id)
+    try {
+      const res = await fetch('/api/instances/reconcile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'undo', id }),
+      })
+      const result = await res.json() as { ok: boolean; error?: string }
+      if (result.ok) {
+        await loadData()
+      } else {
+        alert(result.error ?? 'No se pudo deshacer')
+      }
+    } finally {
+      setReconcileActionId(null)
     }
   }
 
@@ -791,6 +846,14 @@ export default function SettingsPage() {
                 <Signal size={12} className={loadingRemote ? 'animate-pulse' : ''} />
                 {loadingRemote ? 'Cargando...' : 'Ver en Evolution'}
               </button>
+              <button
+                onClick={loadReconcileFindings}
+                disabled={loadingReconcile}
+                className="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 disabled:opacity-40"
+              >
+                <AlertCircle size={12} className={loadingReconcile ? 'animate-pulse' : ''} />
+                {loadingReconcile ? 'Revisando...' : 'Revisar discrepancias'}
+              </button>
             </div>
             <button
               onClick={() => setShowNewInstance(p => !p)}
@@ -816,6 +879,44 @@ export default function SettingsPage() {
                 </div>
                 <p className="text-xs text-blue-500 mt-1.5">El campo "Nombre de instancia" en la app debe coincidir exactamente con uno de estos.</p>
               </div>
+            </div>
+          )}
+
+          {/* Panel de reconciliación */}
+          {reconcileFindings !== null && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 space-y-3">
+              <p className="text-xs font-semibold text-yellow-800">
+                {reconcileFindings.length === 0
+                  ? 'Sin discrepancias: todas las instancias coinciden con Evolution API.'
+                  : `${reconcileFindings.length} instancia(s) con datos desalineados:`}
+              </p>
+              {reconcileFindings.map(f => (
+                <div key={f.id} className="bg-surface border border-yellow-200 rounded-md px-3 py-2 text-xs space-y-1">
+                  {f.kind === 'label_mismatch' ? (
+                    <>
+                      <p>
+                        La app dice <span className="font-mono font-semibold">{f.storedName}</span>
+                        {f.storedPhone && <> ({f.storedPhone})</>} — Evolution dice{' '}
+                        <span className="font-mono font-semibold">{f.realName}</span>
+                        {f.realPhone && <> ({f.realPhone})</>}
+                      </p>
+                      <button
+                        onClick={() => applyReconcile(f.id)}
+                        disabled={reconcileActionId === f.id}
+                        className="text-primary hover:underline font-medium disabled:opacity-40"
+                      >
+                        {reconcileActionId === f.id ? 'Aplicando...' : 'Corregir'}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="text-red-600">
+                      <span className="font-mono font-semibold">{f.storedName}</span>
+                      {f.storedPhone && <> ({f.storedPhone})</>} — API Key inválida ({f.error}). No se puede identificar
+                      automáticamente: buscá este número en Evolution Manager y actualizá el API Key desde &quot;Editar&quot;.
+                    </p>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -1124,6 +1225,15 @@ export default function SettingsPage() {
                                 >
                                   <Edit2 size={12} /> Editar
                                 </button>
+                                {inst.previous_values && (
+                                  <button
+                                    onClick={() => undoReconcile(inst.id)}
+                                    disabled={reconcileActionId === inst.id}
+                                    className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-40"
+                                  >
+                                    {reconcileActionId === inst.id ? 'Deshaciendo...' : 'Deshacer corrección'}
+                                  </button>
+                                )}
                                 {confirmDeleteInstance === inst.id ? (
                                   <div className="flex items-center gap-1">
                                     <span className="text-xs text-red-500">¿Confirmar?</span>
