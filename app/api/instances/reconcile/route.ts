@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { findReconcileDiscrepancies, applyReconcileFix, undoReconcileFix } from '@/lib/instance-reconcile'
 
-export const maxDuration = 30
+export const maxDuration = 120
 
 async function requireAdmin() {
   const supabase = await createServerSupabaseClient()
@@ -34,7 +34,12 @@ export async function POST(req: NextRequest) {
   const { error } = await requireAdmin()
   if (error) return error
 
-  const body = await req.json()
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ ok: false, error: 'Body inválido' }, { status: 400 })
+  }
   const { action, id } = body as { action: 'apply' | 'undo'; id: string }
 
   if (!id || (action !== 'apply' && action !== 'undo')) {
