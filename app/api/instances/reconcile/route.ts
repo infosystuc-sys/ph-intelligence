@@ -26,8 +26,8 @@ export async function GET() {
 
   if (dbError) return NextResponse.json({ error: dbError.message }, { status: 500 })
 
-  const findings = await findReconcileDiscrepancies(instances ?? [])
-  return NextResponse.json({ findings })
+  const { findings, truncated } = await findReconcileDiscrepancies(instances ?? [])
+  return NextResponse.json({ findings, truncated })
 }
 
 export async function POST(req: NextRequest) {

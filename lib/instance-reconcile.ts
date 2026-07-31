@@ -27,6 +27,12 @@ export type ReconcileFinding =
     }
 
 const TIMEOUT_MS = 10000
+// Presupuesto de tiempo total para el loop de reconciliación. maxDuration del route
+// es 120s; con 11 instancias y TIMEOUT_MS=10s el peor caso ronda 110s, demasiado
+// cerca del límite — si Vercel corta la función a los 120s no queda ni respuesta
+// parcial. Con este budget, si se acerca el límite cortamos el loop y devolvemos
+// lo que ya se procesó en vez de morir sin respuesta.
+const BUDGET_MS = 90000
 
 type Identity = { name: string; phone: string | null }
 
@@ -61,9 +67,17 @@ function hasDiscrepancy(inst: ReconcileInstanceRow, identity: Identity): boolean
 // el panel de reconciliación, nunca en carga automática de página — no hace
 // falta paralelizar 11 pedidos y sumar más presión sobre Evolution/Easypanel
 // mientras se investiga si la concurrencia es parte del problema de timeouts.
-export async function findReconcileDiscrepancies(instances: ReconcileInstanceRow[]): Promise<ReconcileFinding[]> {
+export async function findReconcileDiscrepancies(
+  instances: ReconcileInstanceRow[],
+): Promise<{ findings: ReconcileFinding[]; truncated: boolean }> {
   const findings: ReconcileFinding[] = []
+  const startedAt = Date.now()
+  let truncated = false
   for (const inst of instances) {
+    if (Date.now() - startedAt > BUDGET_MS) {
+      truncated = true
+      break
+    }
     const baseUrl = (process.env.EVOLUTION_API_BASE_URL || inst.api_url).replace(/\/$/, '')
     const identity = await fetchRealIdentity(baseUrl, inst.api_key)
     if ('error' in identity) {
@@ -87,7 +101,7 @@ export async function findReconcileDiscrepancies(instances: ReconcileInstanceRow
       })
     }
   }
-  return findings
+  return { findings, truncated }
 }
 
 // Solo corrige instance_name/phone_number — nunca api_key. Si fetchInstances

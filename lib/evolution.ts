@@ -15,6 +15,8 @@ export async function evolutionFetch(url: string, init?: RequestInit): Promise<R
     const secure = u.protocol === 'https:'
     const startedAt = Date.now()
     let connectedAt: number | null = null
+    let resolvedAt: number | null = null
+    let secureAt: number | null = null
     const req = (secure ? https : http).request(
       {
         hostname: u.hostname,
@@ -42,15 +44,24 @@ export async function evolutionFetch(url: string, init?: RequestInit): Promise<R
       } else {
         socket.once('connect', () => { connectedAt = Date.now() })
       }
+      socket.once('lookup', () => { resolvedAt = Date.now() })
+      socket.once('secureConnect', () => { secureAt = Date.now() })
     })
     req.on('error', reject)
     if (init?.signal) {
       ;(init.signal as AbortSignal).addEventListener('abort', () => {
         req.destroy()
         const elapsedMs = Date.now() - startedAt
-        const detail = connectedAt
-          ? `socket conectado a los ${connectedAt - startedAt}ms, sin respuesta ${elapsedMs}ms después`
-          : `socket nunca conectó en ${elapsedMs}ms`
+        let detail: string
+        if (secureAt) {
+          detail = `TLS completado a los ${secureAt - startedAt}ms, sin respuesta ${Date.now() - secureAt}ms después`
+        } else if (connectedAt) {
+          detail = `conectó TCP a los ${connectedAt - startedAt}ms pero el handshake TLS nunca terminó (${elapsedMs}ms transcurridos)`
+        } else if (resolvedAt) {
+          detail = `DNS resolvió a los ${resolvedAt - startedAt}ms pero el socket nunca conectó (${elapsedMs}ms transcurridos)`
+        } else {
+          detail = `socket nunca conectó en ${elapsedMs}ms`
+        }
         reject(Object.assign(new Error(`Timeout tras ${elapsedMs}ms (${detail})`), { name: 'AbortError' }))
       })
     }

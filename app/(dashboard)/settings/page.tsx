@@ -50,6 +50,8 @@ export default function SettingsPage() {
   const [reconcileFindings, setReconcileFindings] = useState<ReconcileFinding[] | null>(null)
   const [loadingReconcile, setLoadingReconcile] = useState(false)
   const [reconcileActionId, setReconcileActionId] = useState<string | null>(null)
+  const [reconcileError, setReconcileError] = useState<string | null>(null)
+  const [reconcileTruncated, setReconcileTruncated] = useState(false)
 
   // Nuevo usuario
   const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'vendedor', password: '', supervisor_id: '' })
@@ -157,11 +159,26 @@ export default function SettingsPage() {
 
   const loadReconcileFindings = async () => {
     setLoadingReconcile(true)
+    setReconcileError(null)
     try {
       const res = await fetch('/api/instances/reconcile')
-      if (!res.ok) return
-      const { findings } = await res.json() as { findings: ReconcileFinding[] }
+      if (!res.ok) {
+        let message = 'No se pudo cargar el diagnóstico'
+        try {
+          const data = await res.json() as { error?: string }
+          if (data?.error) message = data.error
+        } catch {
+          // body no parseable — usar mensaje genérico
+        }
+        setReconcileError(message)
+        return
+      }
+      const { findings, truncated } = await res.json() as { findings: ReconcileFinding[]; truncated?: boolean }
       setReconcileFindings(findings)
+      setReconcileTruncated(!!truncated)
+      setReconcileError(null)
+    } catch {
+      setReconcileError('Error de red al conectar con el servidor')
     } finally {
       setLoadingReconcile(false)
     }
@@ -882,6 +899,11 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {/* Error al cargar diagnóstico de reconciliación */}
+          {reconcileError && (
+            <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{reconcileError}</p>
+          )}
+
           {/* Panel de reconciliación */}
           {reconcileFindings !== null && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 space-y-3">
@@ -890,6 +912,11 @@ export default function SettingsPage() {
                   ? 'Sin discrepancias: todas las instancias coinciden con Evolution API.'
                   : `${reconcileFindings.length} instancia(s) con datos desalineados:`}
               </p>
+              {reconcileTruncated && (
+                <p className="text-xs text-yellow-700 bg-yellow-100 border border-yellow-300 rounded px-2 py-1.5">
+                  Revisión parcial: se alcanzó el límite de tiempo, algunas instancias no se revisaron. Volvé a intentar.
+                </p>
+              )}
               {reconcileFindings.map(f => (
                 <div key={f.id} className="bg-surface border border-yellow-200 rounded-md px-3 py-2 text-xs space-y-1">
                   {f.kind === 'label_mismatch' ? (
