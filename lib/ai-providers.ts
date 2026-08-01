@@ -5,7 +5,7 @@ import { jsonrepair } from 'jsonrepair'
 // Schema de la respuesta esperada del analizador IA.
 // Cuando se pasa a Gemini como responseSchema, el modelo se ve obligado
 // a producir JSON que cumple esta estructura → adiós errores de comillas sin escapar.
-const ANALYSIS_RESPONSE_SCHEMA = {
+export const ANALYSIS_RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     quality_score:        { type: Type.INTEGER, minimum: 0, maximum: 100 },
@@ -25,6 +25,20 @@ const ANALYSIS_RESPONSE_SCHEMA = {
     'conversation_stage', 'talk_ratio_vendor', 'talk_ratio_client',
     'keywords_detected', 'sentiment', 'executive_summary', 'vendor_coaching_note',
   ],
+}
+
+// Schema de la respuesta esperada del análisis global diario de vendedor (ver
+// lib/vendor-global-analysis.ts). Forma completamente distinta a la de arriba
+// — debe pasarse explícitamente, nunca depender del default de callGemini.
+export const VENDOR_GLOBAL_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    summary_text:          { type: Type.STRING },
+    recurring_strengths:   { type: Type.ARRAY, items: { type: Type.STRING } },
+    recurring_weaknesses:  { type: Type.ARRAY, items: { type: Type.STRING } },
+    coaching_plan:         { type: Type.STRING },
+  },
+  required: ['summary_text', 'recurring_strengths', 'recurring_weaknesses', 'coaching_plan'],
 }
 
 export type AIProvider = 'anthropic' | 'gemini' | 'groq'
@@ -132,11 +146,15 @@ export async function callAI(params: {
   // tiene efecto con Gemini (key por instancia de WhatsApp); se ignora para
   // los demás proveedores.
   apiKey?: string
+  // Schema de respuesta estructurada para Gemini. Si no se pasa, usa
+  // ANALYSIS_RESPONSE_SCHEMA (el análisis por conversación). Groq y Anthropic
+  // lo ignoran — dependen de las instrucciones del prompt + response_format.
+  responseSchema?: unknown
 }): Promise<string> {
-  const { provider, systemPrompt, userPrompt, maxTokens = 2048, apiKey } = params
+  const { provider, systemPrompt, userPrompt, maxTokens = 2048, apiKey, responseSchema } = params
 
   switch (provider) {
-    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens, apiKey)
+    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens, apiKey, responseSchema)
     case 'groq':      return callGroq(systemPrompt, userPrompt, maxTokens)
     case 'anthropic': return callAnthropic(systemPrompt, userPrompt, maxTokens)
   }
@@ -196,8 +214,9 @@ export async function callAIWithFallback(params: {
   userPrompt: string
   maxTokens?: number
   instanceGeminiKey?: string | null
+  responseSchema?: unknown
 }): Promise<FallbackResult> {
-  const { systemPrompt, userPrompt, maxTokens, instanceGeminiKey } = params
+  const { systemPrompt, userPrompt, maxTokens, instanceGeminiKey, responseSchema } = params
   const chain = buildFallbackChain(instanceGeminiKey)
   const attempts: FallbackAttempt[] = []
 
@@ -209,6 +228,7 @@ export async function callAIWithFallback(params: {
         userPrompt,
         maxTokens,
         apiKey: tier.apiKey,
+        responseSchema,
       })
       attempts.push({ provider: tier.provider, label: tier.label })
       return { text, providerUsed: tier.provider, attempts }
@@ -248,6 +268,7 @@ async function callGemini(
   userPrompt: string,
   maxTokens: number,
   apiKey?: string,
+  responseSchema: unknown = ANALYSIS_RESPONSE_SCHEMA,
 ): Promise<string> {
   const client = new GoogleGenAI({ apiKey: apiKey || process.env.GEMINI_API_KEY! })
   return withRetry(async () => {
@@ -259,7 +280,7 @@ async function callGemini(
         maxOutputTokens: maxTokens,
         temperature: 0.3,
         responseMimeType: 'application/json',
-        responseSchema: ANALYSIS_RESPONSE_SCHEMA,
+        responseSchema,
       },
     })
     return response.text ?? ''

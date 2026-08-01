@@ -9,6 +9,15 @@ import ScoreBadge from '@/components/ui/ScoreBadge'
 import { STAGE_LABELS, STAGE_COLORS, formatDistanceToNow } from '@/lib/utils'
 import { ArrowLeft, Wifi, WifiOff, TrendingUp, Pencil, Trash2, X, Lock, RefreshCw } from 'lucide-react'
 
+// `date` llega como string "YYYY-MM-DD" (columna DATE de Postgres). Formatearla
+// con `new Date(iso)` la interpreta como medianoche UTC, que en un navegador en
+// horario de Argentina (UTC-3) muestra el día anterior. Formateamos el string
+// directamente, sin pasar por el parseo UTC de Date.
+function formatDateAR(isoDate: string): string {
+  const [year, month, day] = isoDate.split('-')
+  return `${day}/${month}/${year}`
+}
+
 function ScoreLineChart({ data }: { data: { date: string; score: number }[] }) {
   if (data.length < 2) return null
   const W = 560
@@ -290,9 +299,15 @@ export default function VendorProfilePage() {
     setLoadingGlobalHistory(true)
     try {
       const res = await fetch(`/api/vendors/global-analysis?vendorId=${id}`)
-      if (!res.ok) return
+      if (!res.ok) {
+        setGlobalError('No se pudo cargar el histórico del análisis global')
+        return
+      }
       const { history } = await res.json() as { history: VendorDailyAnalysis[] }
       setGlobalHistory(history)
+      setGlobalError(null)
+    } catch {
+      setGlobalError('Error de red al cargar el histórico')
     } finally {
       setLoadingGlobalHistory(false)
     }
@@ -469,7 +484,7 @@ export default function VendorProfilePage() {
                     <div>
                       <div className="flex items-center gap-3 mb-2">
                         <span className="text-xs text-gray-400">
-                          {new Date(latest.date).toLocaleDateString('es-AR')} · {latest.conversations_analyzed} conversaciones analizadas
+                          {formatDateAR(latest.date)} · {latest.conversations_analyzed} conversaciones analizadas
                         </span>
                         {latest.avg_quality_score !== null && (
                           <ScoreBadge score={Math.round(latest.avg_quality_score)} size="sm" />
@@ -524,7 +539,7 @@ export default function VendorProfilePage() {
                     <div className="space-y-1">
                       {globalHistory.slice(1).map(h => (
                         <div key={h.id} className="flex items-center justify-between text-xs text-gray-500 py-1">
-                          <span>{new Date(h.date).toLocaleDateString('es-AR')} · {h.conversations_analyzed} conversaciones</span>
+                          <span>{formatDateAR(h.date)} · {h.conversations_analyzed} conversaciones</span>
                           {h.avg_quality_score !== null && <ScoreBadge score={Math.round(h.avg_quality_score)} size="sm" />}
                         </div>
                       ))}

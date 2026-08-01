@@ -1,5 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js'
-import { callAIWithFallback, AIFallbackError, AI_MODELS, isRateLimitError, parseLLMJSON } from './ai-providers'
+import { callAIWithFallback, AIFallbackError, AI_MODELS, isRateLimitError, parseLLMJSON, VENDOR_GLOBAL_RESPONSE_SCHEMA } from './ai-providers'
 import { ConversationStage, SentimentType, VendorDailyAnalysis } from '@/types'
 
 const WINDOW_HOURS = 72
@@ -207,7 +207,8 @@ export async function generateVendorGlobalAnalysis(
     const result = await callAIWithFallback({
       systemPrompt: SYSTEM_PROMPT,
       userPrompt: buildUserPrompt(vendor.full_name, aggregates, rows),
-      maxTokens: 1024,
+      maxTokens: 2048,
+      responseSchema: VENDOR_GLOBAL_RESPONSE_SCHEMA,
     })
     providerUsed = result.providerUsed
     narrative = sanitizeGlobalAnalysis(parseLLMJSON(result.text))

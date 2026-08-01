@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceSupabaseClient } from '@/lib/supabase-server'
 import { generateVendorGlobalAnalysis, getVendorGlobalAnalysisHistory } from '@/lib/vendor-global-analysis'
 
-export const maxDuration = 60
+export const maxDuration = 120
 
 // Admin: acceso a cualquier vendedor. Supervisor: solo a los vendedores donde
 // users.supervisor_id === su propio id. Vendedor: sin acceso (ni ver ni generar
@@ -31,7 +31,8 @@ async function authorizeVendorAccess(vendorId: string) {
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const vendorId = searchParams.get('vendorId')
-  const limit = Math.min(parseInt(searchParams.get('limit') ?? '14'), 60)
+  const rawLimit = parseInt(searchParams.get('limit') ?? '14')
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 60) : 14
 
   if (!vendorId) return NextResponse.json({ error: 'vendorId requerido' }, { status: 400 })
 
@@ -62,6 +63,10 @@ export async function POST(req: NextRequest) {
   if (error) return error
 
   const service = createServiceSupabaseClient()
-  const result = await generateVendorGlobalAnalysis(service, vendorId, userId!)
-  return NextResponse.json(result)
+  try {
+    const result = await generateVendorGlobalAnalysis(service, vendorId, userId!)
+    return NextResponse.json(result)
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : 'Error interno' }, { status: 500 })
+  }
 }

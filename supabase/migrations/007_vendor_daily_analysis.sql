@@ -27,3 +27,17 @@ CREATE TABLE IF NOT EXISTS public.vendor_daily_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_vendor_daily_analyses_vendedor_date
   ON public.vendor_daily_analyses (vendedor_id, date DESC);
+
+-- ── Row Level Security ────────────────────────────────────────────────────────
+-- Mismo patrón que 002_rls_policies.sql (public.get_user_role()). Sin política
+-- para vendedor — acceso cero intencional, la ruta API ya lo excluye por diseño.
+ALTER TABLE public.vendor_daily_analyses ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "admin_all_vendor_daily_analyses" ON public.vendor_daily_analyses
+  FOR ALL USING (public.get_user_role() = 'admin');
+
+CREATE POLICY "supervisor_select_vendor_daily_analyses" ON public.vendor_daily_analyses
+  FOR SELECT USING (
+    public.get_user_role() = 'supervisor' AND
+    vendedor_id IN (SELECT id FROM public.users WHERE supervisor_id = auth.uid())
+  );
