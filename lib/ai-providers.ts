@@ -150,11 +150,17 @@ export async function callAI(params: {
   // ANALYSIS_RESPONSE_SCHEMA (el análisis por conversación). Groq y Anthropic
   // lo ignoran — dependen de las instrucciones del prompt + response_format.
   responseSchema?: unknown
+  // Presupuesto de "thinking" de Gemini 2.5, en tokens — 0 lo desactiva. Sale
+  // del mismo maxOutputTokens que la respuesta visible, así que en tareas de
+  // síntesis (ej. análisis global de vendedor) puede consumirse casi todo el
+  // presupuesto antes de escribir el JSON, cortando la respuesta a mitad de
+  // camino. Solo tiene efecto con Gemini; se ignora para los demás proveedores.
+  thinkingBudget?: number
 }): Promise<string> {
-  const { provider, systemPrompt, userPrompt, maxTokens = 2048, apiKey, responseSchema } = params
+  const { provider, systemPrompt, userPrompt, maxTokens = 2048, apiKey, responseSchema, thinkingBudget } = params
 
   switch (provider) {
-    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens, apiKey, responseSchema)
+    case 'gemini':    return callGemini(systemPrompt, userPrompt, maxTokens, apiKey, responseSchema, thinkingBudget)
     case 'groq':      return callGroq(systemPrompt, userPrompt, maxTokens)
     case 'anthropic': return callAnthropic(systemPrompt, userPrompt, maxTokens)
   }
@@ -215,8 +221,9 @@ export async function callAIWithFallback(params: {
   maxTokens?: number
   instanceGeminiKey?: string | null
   responseSchema?: unknown
+  thinkingBudget?: number
 }): Promise<FallbackResult> {
-  const { systemPrompt, userPrompt, maxTokens, instanceGeminiKey, responseSchema } = params
+  const { systemPrompt, userPrompt, maxTokens, instanceGeminiKey, responseSchema, thinkingBudget } = params
   const chain = buildFallbackChain(instanceGeminiKey)
   const attempts: FallbackAttempt[] = []
 
@@ -229,6 +236,7 @@ export async function callAIWithFallback(params: {
         maxTokens,
         apiKey: tier.apiKey,
         responseSchema,
+        thinkingBudget,
       })
       attempts.push({ provider: tier.provider, label: tier.label })
       return { text, providerUsed: tier.provider, attempts }
@@ -269,6 +277,7 @@ async function callGemini(
   maxTokens: number,
   apiKey?: string,
   responseSchema: unknown = ANALYSIS_RESPONSE_SCHEMA,
+  thinkingBudget?: number,
 ): Promise<string> {
   const client = new GoogleGenAI({ apiKey: apiKey || process.env.GEMINI_API_KEY! })
   return withRetry(async () => {
@@ -281,6 +290,7 @@ async function callGemini(
         temperature: 0.3,
         responseMimeType: 'application/json',
         responseSchema,
+        ...(thinkingBudget !== undefined ? { thinkingConfig: { thinkingBudget } } : {}),
       },
     })
     return response.text ?? ''

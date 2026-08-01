@@ -209,6 +209,12 @@ export async function generateVendorGlobalAnalysis(
       userPrompt: buildUserPrompt(vendor.full_name, aggregates, rows),
       maxTokens: 2048,
       responseSchema: VENDOR_GLOBAL_RESPONSE_SCHEMA,
+      // Gemini 2.5 gasta "thinking" tokens del mismo presupuesto que la
+      // respuesta visible — en la primera prueba real esto cortó el JSON a
+      // mitad de camino (summary_text truncado, el resto de los campos ni
+      // llegaba a generarse). Esta tarea es síntesis + JSON estructurado, no
+      // razonamiento que se beneficie de thinking — lo desactivamos.
+      thinkingBudget: 0,
     })
     providerUsed = result.providerUsed
     narrative = sanitizeGlobalAnalysis(parseLLMJSON(result.text))
