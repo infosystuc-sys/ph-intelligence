@@ -169,6 +169,28 @@ export interface EvolutionMessage {
   pushName?: string
 }
 
+// ── Análisis global diario de vendedor ────────────────────────────────────────
+export interface VendorDailyAnalysis {
+  id: string
+  vendedor_id: string
+  date: string
+  window_start: string
+  window_end: string
+  conversations_analyzed: number
+  avg_quality_score: number | null
+  avg_quality_score_prev_window: number | null
+  avg_talk_ratio_vendor: number | null
+  sentiment_counts: Record<SentimentType, number>
+  stage_counts: Record<ConversationStage, number>
+  recurring_strengths: string[]
+  recurring_weaknesses: string[]
+  summary_text: string
+  coaching_plan: string
+  model_used: string | null
+  generated_by: string | null
+  created_at: string
+}
+
 // ── Respuesta Análisis IA ─────────────────────────────────────────────────────
 export interface AIAnalysisResponse {
   quality_score: number

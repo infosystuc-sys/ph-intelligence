@@ -1,7 +1,6 @@
 import { createServiceSupabaseClient } from './supabase-server'
 import { AIAnalysisResponse, ConversationStage, Message } from '@/types'
-import { callAIWithFallback, AIFallbackError, AI_MODELS, isRateLimitError, AIProvider } from './ai-providers'
-import { jsonrepair } from 'jsonrepair'
+import { callAIWithFallback, AIFallbackError, AI_MODELS, isRateLimitError, AIProvider, parseLLMJSON, extractJSON } from './ai-providers'
 
 const SYSTEM_PROMPT = `Eres un experto en ventas consultivas y fidelización de clientes en el rubro de electrodomésticos y artículos para el hogar en Argentina.
 Tu tarea es auditar conversaciones de WhatsApp entre vendedores de Punto Hogar y clientes de su cartera activa (clientes que ya han comprado anteriormente en la empresa).
@@ -32,37 +31,6 @@ Criterios de evaluación estrictos para el quality_score:
 - Ortografía, claridad y formato (10 pts): ¿Usa audios largos innecesarios o textos claros y fáciles de leer?
 
 Responde ÚNICAMENTE con el JSON válido, sin formato markdown de bloques de código y sin texto introductorio o de despedida.`
-
-function extractJSON(raw: string): string {
-  // Quitar fences de markdown (con o sin tag de lenguaje)
-  const fenced = raw.match(/```(?:\w+)?\s*([\s\S]*?)```/)
-  if (fenced?.[1]?.trim()) return fenced[1].trim()
-  // Extraer el objeto JSON más externo por posición, no por regex greedy
-  const start = raw.indexOf('{')
-  const end = raw.lastIndexOf('}')
-  if (start !== -1 && end > start) return raw.slice(start, end + 1)
-  return raw.trim()
-}
-
-// Parse robusto: intenta JSON.parse normal y si falla intenta repararlo.
-// Los LLMs a veces dejan comillas sin escapar, comas finales, o caracteres
-// de control dentro de strings. jsonrepair maneja estos casos.
-function parseLLMJSON(raw: string): unknown {
-  const cleaned = extractJSON(raw)
-  try {
-    return JSON.parse(cleaned)
-  } catch (firstErr) {
-    try {
-      const repaired = jsonrepair(cleaned)
-      const result = JSON.parse(repaired)
-      console.warn('[AI] JSON reparado con jsonrepair (parse original falló:', (firstErr as Error).message + ')')
-      return result
-    } catch {
-      // Si la reparación también falla, lanzar el error original (más informativo)
-      throw firstErr
-    }
-  }
-}
 
 // ── Motor de Análisis IA ──────────────────────────────────────────────────────
 export async function analyzeConversation(

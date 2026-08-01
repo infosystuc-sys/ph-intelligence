@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, Type } from '@google/genai'
+import { jsonrepair } from 'jsonrepair'
 
 // Schema de la respuesta esperada del analizador IA.
 // Cuando se pasa a Gemini como responseSchema, el modelo se ve obligado
@@ -304,4 +305,34 @@ async function callGroq(
     }
     return json.choices?.[0]?.message?.content ?? ''
   })
+}
+
+// ── Parseo robusto de JSON devuelto por un LLM ───────────────────────────────
+// Compartido por todo lo que le pide JSON a un LLM (análisis de conversación,
+// análisis global de vendedor). Los LLMs a veces envuelven el JSON en fences de
+// markdown, agregan texto alrededor, o dejan comillas/comas mal escapadas —
+// jsonrepair es la red de seguridad para ese último caso.
+export function extractJSON(raw: string): string {
+  const fenced = raw.match(/```(?:\w+)?\s*([\s\S]*?)```/)
+  if (fenced?.[1]?.trim()) return fenced[1].trim()
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start !== -1 && end > start) return raw.slice(start, end + 1)
+  return raw.trim()
+}
+
+export function parseLLMJSON(raw: string): unknown {
+  const cleaned = extractJSON(raw)
+  try {
+    return JSON.parse(cleaned)
+  } catch (firstErr) {
+    try {
+      const repaired = jsonrepair(cleaned)
+      const result = JSON.parse(repaired)
+      console.warn('[AI] JSON reparado con jsonrepair (parse original falló:', (firstErr as Error).message + ')')
+      return result
+    } catch {
+      throw firstErr
+    }
+  }
 }
