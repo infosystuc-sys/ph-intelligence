@@ -3,11 +3,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
-import { Conversation, AIAnalysis, User, ConversationStage } from '@/types'
+import { Conversation, AIAnalysis, User, ConversationStage, VendorDailyAnalysis } from '@/types'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import ScoreBadge from '@/components/ui/ScoreBadge'
 import { STAGE_LABELS, STAGE_COLORS, formatDistanceToNow } from '@/lib/utils'
-import { ArrowLeft, Wifi, WifiOff, TrendingUp, Pencil, Trash2, X } from 'lucide-react'
+import { ArrowLeft, Wifi, WifiOff, TrendingUp, Pencil, Trash2, X, Lock, RefreshCw } from 'lucide-react'
 
 function ScoreLineChart({ data }: { data: { date: string; score: number }[] }) {
   if (data.length < 2) return null
@@ -222,19 +222,29 @@ export default function VendorProfilePage() {
   const [loading, setLoading] = useState(true)
   const [movingConv, setMovingConv] = useState<string | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
+  const [canSeeGlobalAnalysis, setCanSeeGlobalAnalysis] = useState(false)
   const [showEdit, setShowEdit] = useState(false)
   const [showDelete, setShowDelete] = useState(false)
+  const [globalHistory, setGlobalHistory] = useState<VendorDailyAnalysis[]>([])
+  const [loadingGlobalHistory, setLoadingGlobalHistory] = useState(false)
+  const [generatingGlobal, setGeneratingGlobal] = useState(false)
+  const [globalError, setGlobalError] = useState<string | null>(null)
 
   useEffect(() => {
     loadVendorData()
-    checkRole()
   }, [id])
 
-  const checkRole = async () => {
+  useEffect(() => {
+    if (canSeeGlobalAnalysis) loadGlobalHistory()
+  }, [canSeeGlobalAnalysis, id])
+
+  const checkRole = async (vendorSupervisorId: string | null) => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { data } = await supabase.from('users').select('role').eq('id', user.id).single()
-    setIsAdmin(data?.role === 'admin')
+    const admin = data?.role === 'admin'
+    setIsAdmin(admin)
+    setCanSeeGlobalAnalysis(admin || (data?.role === 'supervisor' && vendorSupervisorId === user.id))
   }
 
   const loadVendorData = async () => {
@@ -258,6 +268,7 @@ export default function VendorProfilePage() {
     ])
 
     setVendor(vendorRes.data)
+    if (vendorRes.data) checkRole(vendorRes.data.supervisor_id)
     setConversations((convsRes.data ?? []) as ConvWithAnalysis[])
     setKpis(kpisRes.data ?? [])
     setInstance(instanceRes.data)
@@ -273,6 +284,40 @@ export default function VendorProfilePage() {
     })
     await loadVendorData()
     setMovingConv(null)
+  }
+
+  const loadGlobalHistory = async () => {
+    setLoadingGlobalHistory(true)
+    try {
+      const res = await fetch(`/api/vendors/global-analysis?vendorId=${id}`)
+      if (!res.ok) return
+      const { history } = await res.json() as { history: VendorDailyAnalysis[] }
+      setGlobalHistory(history)
+    } finally {
+      setLoadingGlobalHistory(false)
+    }
+  }
+
+  const generateGlobalAnalysis = async () => {
+    setGeneratingGlobal(true)
+    setGlobalError(null)
+    try {
+      const res = await fetch('/api/vendors/global-analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vendorId: id }),
+      })
+      const result = await res.json() as { ok: boolean; data?: VendorDailyAnalysis; error?: string }
+      if (result.ok) {
+        await loadGlobalHistory()
+      } else {
+        setGlobalError(result.error ?? 'No se pudo generar el análisis')
+      }
+    } catch {
+      setGlobalError('Error de red al generar el análisis')
+    } finally {
+      setGeneratingGlobal(false)
+    }
   }
 
   const getConvsByStage = (stage: ConversationStage) => {
@@ -385,6 +430,109 @@ export default function VendorProfilePage() {
               Evolución del Score (últimas {chartData.length} sesiones)
             </h3>
             <ScoreLineChart data={chartData} />
+          </div>
+        )}
+
+        {/* Análisis global diario (últimos 3 días) */}
+        {canSeeGlobalAnalysis && (
+          <div className="bg-surface rounded-lg shadow-sm border border-border p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-body">Análisis Global (últimos 3 días)</h3>
+              <button
+                onClick={generateGlobalAnalysis}
+                disabled={generatingGlobal}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary hover:bg-primary-dark text-white font-semibold transition-colors disabled:opacity-60"
+              >
+                <RefreshCw size={14} className={generatingGlobal ? 'animate-spin' : ''} />
+                {generatingGlobal ? 'Generando...' : 'Generar análisis de hoy'}
+              </button>
+            </div>
+
+            {globalError && (
+              <p className="text-sm text-red-500 mb-3">{globalError}</p>
+            )}
+
+            {loadingGlobalHistory ? (
+              <p className="text-sm text-gray-400">Cargando...</p>
+            ) : globalHistory.length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-4">
+                Todavía no se generó ningún análisis global para este vendedor.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {(() => {
+                  const latest = globalHistory[0]
+                  const trend = latest.avg_quality_score !== null && latest.avg_quality_score_prev_window !== null
+                    ? latest.avg_quality_score - latest.avg_quality_score_prev_window
+                    : null
+                  return (
+                    <div>
+                      <div className="flex items-center gap-3 mb-2">
+                        <span className="text-xs text-gray-400">
+                          {new Date(latest.date).toLocaleDateString('es-AR')} · {latest.conversations_analyzed} conversaciones analizadas
+                        </span>
+                        {latest.avg_quality_score !== null && (
+                          <ScoreBadge score={Math.round(latest.avg_quality_score)} size="sm" />
+                        )}
+                        {trend !== null && (
+                          <span className={`text-xs font-semibold ${trend > 0 ? 'text-green-600' : trend < 0 ? 'text-red-500' : 'text-gray-400'}`}>
+                            {trend > 0 ? '▲' : trend < 0 ? '▼' : '='} {Math.abs(trend).toFixed(1)} vs. período anterior
+                          </span>
+                        )}
+                      </div>
+
+                      {latest.summary_text && (
+                        <p className="text-sm text-gray-700 leading-relaxed mb-3">{latest.summary_text}</p>
+                      )}
+
+                      {(latest.recurring_strengths.length > 0 || latest.recurring_weaknesses.length > 0) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                          {latest.recurring_strengths.length > 0 && (
+                            <div>
+                              <p className="text-xs font-semibold text-green-700 mb-1">Fortalezas recurrentes</p>
+                              <ul className="text-xs text-gray-600 space-y-0.5 list-disc list-inside">
+                                {latest.recurring_strengths.map((s, i) => <li key={i}>{s}</li>)}
+                              </ul>
+                            </div>
+                          )}
+                          {latest.recurring_weaknesses.length > 0 && (
+                            <div>
+                              <p className="text-xs font-semibold text-red-600 mb-1">Debilidades recurrentes</p>
+                              <ul className="text-xs text-gray-600 space-y-0.5 list-disc list-inside">
+                                {latest.recurring_weaknesses.map((w, i) => <li key={i}>{w}</li>)}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {latest.coaching_plan && (
+                        <div className="bg-yellow-50 rounded-lg border border-yellow-200 p-4 mb-3">
+                          <h4 className="font-semibold text-yellow-800 flex items-center gap-2 mb-2 text-sm">
+                            <Lock size={14} /> Plan de Coaching (Privado)
+                          </h4>
+                          <p className="text-sm text-yellow-900 leading-relaxed">{latest.coaching_plan}</p>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+
+                {globalHistory.length > 1 && (
+                  <div className="pt-3 border-t border-border">
+                    <p className="text-xs font-semibold text-gray-500 mb-2">Histórico</p>
+                    <div className="space-y-1">
+                      {globalHistory.slice(1).map(h => (
+                        <div key={h.id} className="flex items-center justify-between text-xs text-gray-500 py-1">
+                          <span>{new Date(h.date).toLocaleDateString('es-AR')} · {h.conversations_analyzed} conversaciones</span>
+                          {h.avg_quality_score !== null && <ScoreBadge score={Math.round(h.avg_quality_score)} size="sm" />}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
