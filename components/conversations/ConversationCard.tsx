@@ -224,17 +224,17 @@ function ConversationCard({
         </div>
       )}
 
-      {/* Avatar con indicador de atención */}
-      <div className="relative shrink-0">
-        <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${
-          isGroup ? 'bg-blue-100 text-blue-600' : 'bg-gray-200 text-gray-600'
-        }`}>
-          {isGroup ? <Users size={18} /> : displayName.charAt(0).toUpperCase()}
+      {/* Avatar solo para grupos — para contactos individuales era redundante con el
+          nombre (misma letra) y su color no tenía significado, a diferencia del resto
+          de los indicadores de color de la card (score, etapa, urgencia). Sacarlo le
+          devuelve el espacio al preview del mensaje. La atención (needsAttention) ya
+          se ve por el borde izquierdo ámbar y el chip "Sin resp." — no hacía falta
+          replicarla acá con un punto pulsante. */}
+      {isGroup && (
+        <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm bg-blue-100 text-blue-600 shrink-0">
+          <Users size={18} />
         </div>
-        {needsAttention && (
-          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-amber-400 border-2 border-white rounded-full animate-pulse" />
-        )}
-      </div>
+      )}
 
       <div className="flex-1 min-w-0">
         {/* Fila 1: nombre + (tiempo, score) a la derecha */}
