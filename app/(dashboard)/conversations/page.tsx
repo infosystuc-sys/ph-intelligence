@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import ConvList from '@/components/conversations/ConvList'
 import ChatBubble from '@/components/conversations/ChatBubble'
-import ScoreBadge from '@/components/ui/ScoreBadge'
+import ScoreRing from '@/components/ui/ScoreRing'
 import { Conversation, Message } from '@/types'
 import { createBrowserSupabaseClient } from '@/lib/supabase'
 import { Search, Filter, Brain, ExternalLink, RefreshCw, X, Loader2, PhoneOff, Users, ChevronDown, Pencil, Check, ScrollText, CheckCircle, AlertCircle, Clock, Trash2, Archive, CheckSquare } from 'lucide-react'
@@ -919,7 +919,7 @@ export default function ConversationsPage() {
                   </div>
                 ) : (
                   <div className="group/hname flex items-center gap-1.5 min-w-0">
-                    <h3 className="font-semibold text-body truncate">{selectedDisplayName}</h3>
+                    <h3 className="font-display font-bold text-body truncate">{selectedDisplayName}</h3>
                     <button
                       onClick={() => {
                         setEditNameValue(selected.display_name ?? selected.client_name ?? '')
@@ -979,7 +979,7 @@ export default function ConversationsPage() {
               <div className="flex items-center gap-2 shrink-0">
                 {latestAnalysis ? (
                   <div className="flex items-center gap-2">
-                    <ScoreBadge score={(latestAnalysis as { quality_score: number }).quality_score} size="sm" />
+                    <ScoreRing score={(latestAnalysis as { quality_score: number }).quality_score} size="lg" />
                     <button
                       onClick={async () => {
                         setLoadingReport(true)

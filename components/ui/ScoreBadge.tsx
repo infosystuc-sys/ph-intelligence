@@ -1,8 +1,10 @@
 import { ScoreBadgeProps } from '@/types'
 
 // Los colores del score son semánticos (verde=bueno, amarillo=medio, rojo=bajo)
-// No usan la paleta de marca
-function getScoreColor(score: number) {
+// No usan la paleta de marca. Exportada para que ScoreRing use la misma
+// clasificación — un mismo score debe verse del mismo color en toda la app,
+// sea badge o anillo.
+export function getScoreColor(score: number) {
   if (score >= 75) return { bg: 'bg-green-100', text: 'text-green-700', bar: 'bg-green-500' }
   if (score >= 50) return { bg: 'bg-yellow-100', text: 'text-yellow-700', bar: 'bg-yellow-500' }
   return { bg: 'bg-red-100', text: 'text-red-600', bar: 'bg-red-500' }

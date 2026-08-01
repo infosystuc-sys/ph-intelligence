@@ -2,7 +2,7 @@
 
 import { memo, useMemo, useState } from 'react'
 import { Conversation } from '@/types'
-import ScoreBadge from '@/components/ui/ScoreBadge'
+import ScoreRing from '@/components/ui/ScoreRing'
 import VendorAvatar from '@/components/ui/VendorAvatar'
 import { formatDistanceToNow, formatPhone, STAGE_LABELS } from '@/lib/utils'
 import { Users, Pencil, Check, X, CreditCard, Clock, MessageSquare, HelpCircle } from 'lucide-react'
@@ -260,7 +260,7 @@ function ConversationCard({
               </div>
             ) : (
               <div className="group/name flex items-center gap-1 min-w-0">
-                <span className="font-medium text-body text-sm truncate min-w-0">
+                <span className="font-display font-semibold text-body text-sm truncate min-w-0">
                   {displayName}
                 </span>
                 {conversation.display_name && conversation.client_name && conversation.display_name !== conversation.client_name && (
@@ -319,7 +319,7 @@ function ConversationCard({
               )
             })()}
             {analysis ? (
-              <ScoreBadge score={(analysis as { quality_score: number }).quality_score} size="md" />
+              <ScoreRing score={(analysis as { quality_score: number }).quality_score} size="sm" />
             ) : !isGroup && (
               <span
                 className="flex items-center gap-0.5 text-[10px] font-medium text-gray-400 bg-gray-100 border border-dashed border-gray-300 rounded-full px-1.5 py-0.5"
@@ -347,10 +347,11 @@ function ConversationCard({
               {STAGE_LABELS[stage] ?? stage}
             </span>
           )}
-          {/* Cantidad de mensajes */}
+          {/* Cantidad de mensajes — texto plano, no compite visualmente con las
+              etiquetas que sí son señal (etapa, verificado, sin responder) */}
           {typeof conversation.message_count === 'number' && conversation.message_count > 0 && (
             <span
-              className="flex items-center gap-0.5 text-[10px] font-medium text-gray-600 bg-gray-100 rounded-full px-1.5 py-0.5 shrink-0 whitespace-nowrap"
+              className="flex items-center gap-0.5 text-[10px] text-gray-400 shrink-0 whitespace-nowrap"
               title={`${conversation.message_count} mensajes en total`}
             >
               <MessageSquare size={9} /> {conversation.message_count} msg
@@ -366,6 +367,9 @@ function ConversationCard({
               <Users size={9} /> Grupo
             </span>
           )}
+          {/* Un solo chip "cliente verificado" — DNI y observación quedan en
+              el tooltip (matchTooltip ya los incluye) en vez de ocupar chips
+              propios; menos ruido visual permanente para el mismo dato. */}
           {hasBaseMatch && (
             <span
               className="flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 whitespace-nowrap bg-green-100 text-green-700 border border-green-200"
@@ -375,22 +379,6 @@ function ConversationCard({
               {resolvedLocalidad ?? 'Cliente'}
               {primaryTarjeta && <span className="font-normal opacity-80"> · {primaryTarjeta}</span>}
               {extraTarjetas > 0 && <span className="font-normal opacity-80"> +{extraTarjetas}</span>}
-            </span>
-          )}
-          {hasBaseMatch && resolvedCuitDni && (
-            <span
-              className="text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded-full shrink-0 whitespace-nowrap"
-              title={matchTooltip}
-            >
-              DNI {resolvedCuitDni}
-            </span>
-          )}
-          {hasBaseMatch && resolvedObservacion && (
-            <span
-              className="text-[10px] italic text-gray-600 truncate max-w-50 shrink"
-              title={resolvedObservacion}
-            >
-              &ldquo;{resolvedObservacion}&rdquo;
             </span>
           )}
           {showVendor && conversation.vendedor && (

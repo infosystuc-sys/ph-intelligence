@@ -44,6 +44,11 @@
   box-sizing: border-box;
 }
 
+/* Manrope — solo nombres/headers de la propuesta de rediseño de Conversaciones */
+.font-display {
+  font-family: var(--font-display), Inter, sans-serif;
+}
+
 body {
   background: var(--color-bg);
   color: var(--color-text-primary);
